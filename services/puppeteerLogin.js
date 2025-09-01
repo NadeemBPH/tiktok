@@ -33,30 +33,53 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   let browser;
   let connectedToExisting = false;
 
-  // Default Chrome paths to check
+  console.log('Checking for Chrome/Chromium in common locations...');
+  
+  // Default Chrome paths to check with logging
   const chromePaths = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    process.env.CHROME_BIN,
-    process.env.CHROME_PATH,
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/google-chrome',
-    '/usr/local/bin/chromium',
-    '/usr/local/bin/chromium-browser'
+    { path: process.env.PUPPETEER_EXECUTABLE_PATH, name: 'PUPPETEER_EXECUTABLE_PATH' },
+    { path: process.env.CHROME_BIN, name: 'CHROME_BIN' },
+    { path: process.env.CHROME_PATH, name: 'CHROME_PATH' },
+    { path: '/usr/bin/chromium', name: 'System Chromium' },
+    { path: '/usr/bin/chromium-browser', name: 'System Chromium Browser' },
+    { path: '/usr/bin/google-chrome-stable', name: 'Google Chrome Stable' },
+    { path: '/usr/bin/google-chrome', name: 'Google Chrome' },
+    { path: '/usr/local/bin/chromium', name: 'Local Chromium' },
+    { path: '/usr/local/bin/chromium-browser', name: 'Local Chromium Browser' }
   ];
 
-  // Find the first existing Chrome path
-  let chromePath = chromePaths.find(path => path && require('fs').existsSync(path));
+  // Find the first existing Chrome path with detailed logging
+  let chromePath = null;
+  for (const { path, name } of chromePaths) {
+    if (!path) continue;
+    
+    const exists = require('fs').existsSync(path);
+    console.log(`Checking ${name} at ${path}: ${exists ? 'Found' : 'Not found'}`);
+    
+    if (exists) {
+      chromePath = path;
+      console.log(`✅ Using ${name} at: ${path}`);
+      break;
+    }
+  }
   
   // If no Chrome found and we're in Railway, use the installed Chromium
   if (!chromePath && (process.env.IS_RAILWAY || process.env.RAILWAY)) {
     chromePath = '/usr/bin/chromium';
+    console.log(`🚂 Railway environment detected, defaulting to: ${chromePath}`);
   }
 
-  // launchOptions for a fallback launch
+  if (!chromePath) {
+    console.warn('⚠️ No Chrome/Chromium executable found in common locations');
+  }
+
+  // Enhanced launch options for better stability
   const launchOptions = {
     headless: 'new',
+    ignoreHTTPSErrors: true,
+    executablePath: chromePath,
+    timeout: 30000, // 30 seconds
+    dumpio: true, // pipe browser process stdout and stderr
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -73,10 +96,44 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       '--disable-setuid-sandbox',
       '--disable-features=IsolateOrigins,site-per-process',
       '--remote-debugging-port=9222',
-      '--remote-debugging-address=0.0.0.0'
+      '--remote-debugging-address=0.0.0.0',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--window-size=1920,1080',
+      '--start-maximized',
+      '--disable-popup-blocking',
+      '--disable-notifications',
+      '--disable-extensions',
+      '--mute-audio',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-client-side-phishing-detection',
+      '--disable-default-apps',
+      '--disable-hang-monitor',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--no-default-browser-check',
+      '--safebrowsing-disable-auto-update',
+      '--password-store=basic',
+      '--use-mock-keychain'
     ],
+    defaultViewport: {
+      width: 1920,
+      height: 1080,
+      deviceScaleFactor: 1,
+      hasTouch: false,
+      isLandscape: false,
+      isMobile: false,
+    },
     ...opts.launchOptions,
   };
+  
+  console.log('Launch options prepared:', JSON.stringify({
+    ...launchOptions,
+    // Don't log sensitive data
+    args: launchOptions.args,
+    executablePath: chromePath ? 'set' : 'not set'
+  }, null, 2));
 
   // Set the executable path if found
   if (chromePath) {
