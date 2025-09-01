@@ -1,0 +1,15 @@
+[build]
+  builder = "nixpacks"
+  buildCommand = "npm install"
+  installCommand = "npm install"
+  startCommand = "npm start"
+
+[build.environment]
+  NPM_CONFIG_PRODUCTION = "false"
+  NODE_ENV = "production"
+  IS_RAILWAY = "true"
+  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "false"
+  PUPPETEER_EXECUTABLE_PATH = "/usr/bin/google-chrome-stable"
+
+[deploy]
+  startCommand = "npm start"

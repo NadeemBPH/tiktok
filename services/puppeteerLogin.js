@@ -35,13 +35,32 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
 
   // launchOptions for a fallback launch
   const launchOptions = {
-    headless: HEADLESS_ENV,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    headless: 'new', // Use new headless mode for better compatibility
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-features=site-per-process',
+      '--shm-size=3gb',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+    ],
     ...opts.launchOptions,
   };
 
+  // Use Railway's environment variable for Chrome path if available
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
     launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  } else if (process.env.IS_RAILWAY) {
+    // Default Chrome path for Railway
+    launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || 
+      '/usr/bin/google-chrome-stable';
   }
 
   try {
