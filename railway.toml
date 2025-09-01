@@ -1,58 +1,23 @@
 [build]
-  builder = "nixpacks"
-  buildCommand = "npm install"
-  installCommand = "npm install --production=false"
-  startCommand = "npm start"
-
-[build.environment]
-  NPM_CONFIG_PRODUCTION = "false"
-  NODE_ENV = "production"
-  IS_RAILWAY = "true"
-  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "false"
-  PUPPETEER_EXECUTABLE_PATH = "/usr/bin/google-chrome-stable"
-  CHROME_PATH = "/usr/bin/google-chrome-stable"
-  CHROME_BIN = "/usr/bin/google-chrome-stable"
+  builder = "dockerfile"
+  buildCommand = "docker build -t tiktok-scraper ."
 
 [deploy]
-  startCommand = "npm start"
+  startCommand = "node server.js"
 
-[build.nixpacks]
-  nixPkgs = [
-    "chromium",
-    "chromedriver",
-    "google-chrome",
-    "libxkbcommon",
-    "libX11",
-    "libXcomposite",
-    "libXcursor",
-    "libXdamage",
-    "libXext",
-    "libXfixes",
-    "libXi",
-    "libXrandr",
-    "libXrender",
-    "libXScrnSaver",
-    "libxshmfence",
-    "libXtst",
-    "nss",
-    "atk",
-    "at-spi2-atk",
-    "at-spi2-core",
-    "cups",
-    "dbus",
-    "drm",
-    "expat",
-    "gdk-pixbuf",
-    "glib",
-    "gtk+3",
-    "libappindicator-gtk3",
-    "libdrm",
-    "libgbm",
-    "libgcc",
-    "libpulseaudio",
-    "libxcb",
-    "nspr",
-    "pango",
-    "xcb-util",
-    "xorg.xeyes"
-  ]
+[build.environment]
+  NODE_ENV = "production"
+  IS_RAILWAY = "true"
+  RAILWAY = "true"
+  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
+  CHROME_PATH = "/usr/bin/chromium"
+  CHROME_BIN = "/usr/bin/chromium"
+  PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
+  
+[build.docker]
+  # This ensures the Dockerfile is used for building the application
+  dockerfile = "Dockerfile"
+  
+[build.docker.buildArgs]
+  # Add any build args here if needed
+  NODE_ENV = "production"

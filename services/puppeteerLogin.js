@@ -33,9 +33,30 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   let browser;
   let connectedToExisting = false;
 
+  // Default Chrome paths to check
+  const chromePaths = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    process.env.CHROME_BIN,
+    process.env.CHROME_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/local/bin/chromium',
+    '/usr/local/bin/chromium-browser'
+  ];
+
+  // Find the first existing Chrome path
+  let chromePath = chromePaths.find(path => path && require('fs').existsSync(path));
+  
+  // If no Chrome found and we're in Railway, use the installed Chromium
+  if (!chromePath && (process.env.IS_RAILWAY || process.env.RAILWAY)) {
+    chromePath = '/usr/bin/chromium';
+  }
+
   // launchOptions for a fallback launch
   const launchOptions = {
-    headless: 'new', // Use new headless mode for better compatibility
+    headless: 'new',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -49,18 +70,20 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       '--disable-features=site-per-process',
       '--shm-size=3gb',
       '--disable-web-security',
+      '--disable-setuid-sandbox',
       '--disable-features=IsolateOrigins,site-per-process',
+      '--remote-debugging-port=9222',
+      '--remote-debugging-address=0.0.0.0'
     ],
     ...opts.launchOptions,
   };
 
-  // Use Railway's environment variable for Chrome path if available
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-  } else if (process.env.IS_RAILWAY) {
-    // Default Chrome path for Railway
-    launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || 
-      '/usr/bin/google-chrome-stable';
+  // Set the executable path if found
+  if (chromePath) {
+    console.log(`Using Chrome at: ${chromePath}`);
+    launchOptions.executablePath = chromePath;
+  } else {
+    console.warn('No Chrome/Chromium executable found in common locations. Letting Puppeteer handle it.');
   }
 
   try {
