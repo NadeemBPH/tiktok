@@ -1,34 +1,68 @@
 # Use the official Node.js image
 FROM node:18-slim
 
-# Install latest Chrome dev package and fonts to support major charsets (Chinese, Japanese, Arabic, Hebrew, Thai and a few others)
-# Note: This installs the necessary libs to make the browser work with Puppeteer.
-RUN apt-get update \
-    && apt-get install -y wget gnupg \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
+# Install required system packages
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    apt-transport-https \
+    software-properties-common \
+    xvfb \
+    x11-xkb-utils \
+    xfonts-100dpi \
+    xfonts-75dpi \
+    xfonts-scalable \
+    xfonts-cyrillic \
+    x11-apps \
+    clang \
+    libdbus-1-dev \
+    libgtk2.0-0 \
+    libnotify-dev \
+    libgconf-2-4 \
+    libnss3 \
+    libxss1 \
+    libasound2 \
+    libxtst6 \
+    xauth \
+    xvfb \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Google Chrome
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
-    && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf \
-      --no-install-recommends \
+    && apt-get install -y google-chrome-stable \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Chromium and its dependencies
-RUN apt-get update \
-    && apt-get install -y chromium \
-    && rm -rf /var/lib/apt/lists/*
+# Verify Chrome installation
+RUN google-chrome --version
 
-# Create a symbolic link for Chromium
-RUN ln -s /usr/bin/chromium /usr/bin/chromium-browser \
-    && ln -s /usr/bin/chromium /usr/bin/google-chrome \
-    && ln -s /usr/bin/chromium /usr/bin/google-chrome-stable
+# Set Chrome as the default browser
+RUN update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/google-chrome-stable 200 \
+    && update-alternatives --set x-www-browser /usr/bin/google-chrome-stable \
+    && update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/google-chrome-stable 200 \
+    && update-alternatives --set gnome-www-browser /usr/bin/google-chrome-stable
+
+# Create a non-root user
+RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
+    && mkdir -p /home/pptruser/Downloads \
+    && chown -R pptruser:pptruser /home/pptruser
 
 # Set environment variables
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV CHROME_PATH=/usr/bin/chromium
-ENV CHROME_BIN=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+ENV CHROME_PATH=/usr/bin/google-chrome-stable
+ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_ENV=production
+ENV DISPLAY=:99
+ENV NO_SANDBOX=true
+ENV NO_PROXY=*
+ENV LANG="C.UTF-8"
+ENV LC_ALL="C.UTF-8"
 
 # Create app directory
 WORKDIR /app
@@ -42,8 +76,14 @@ RUN npm install
 # Copy app source
 COPY . .
 
-# Expose the app port
-EXPOSE 4000
+# Set proper permissions
+RUN chown -R pptruser:pptruser /app
 
-# Start the application
-CMD ["node", "server.js"]
+# Run as non-root user
+USER pptruser
+
+# Expose the app port
+EXPOSE 3000
+
+# Start the application with xvfb-run
+CMD ["xvfb-run", "--server-args=\"-screen 0 1280x800x24 -ac -listen tcp -nolisten unix\"", "node", "server.js"]

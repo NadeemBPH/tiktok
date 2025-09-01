@@ -24,6 +24,12 @@ require("dotenv").config();
  * Then call loginTikTok(loginUsername, loginPassword).
  */
 async function loginTikTok(loginUsername, loginPassword, opts = {}) {
+  console.log('🚀 Starting TikTok login process...');
+  console.log('Environment:', {
+    NODE_ENV: process.env.NODE_ENV,
+    IS_RAILWAY: process.env.IS_RAILWAY || 'false',
+    RAILWAY: process.env.RAILWAY || 'false'
+  });
   const HEADLESS_ENV = (process.env.HEADLESS ?? "true").toLowerCase() === "true";
   const DEFAULT_TIMEOUT = parseInt(process.env.PUPPETEER_TIMEOUT || "60000", 10); // 60s
   const connectExisting = (process.env.CONNECT_EXISTING_CHROME === "true") || opts.connectExisting;
@@ -35,37 +41,51 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
 
   console.log('Checking for Chrome/Chromium in common locations...');
   
-  // Default Chrome paths to check with logging
-  const chromePaths = [
-    { path: process.env.PUPPETEER_EXECUTABLE_PATH, name: 'PUPPETEER_EXECUTABLE_PATH' },
-    { path: process.env.CHROME_BIN, name: 'CHROME_BIN' },
-    { path: process.env.CHROME_PATH, name: 'CHROME_PATH' },
-    { path: '/usr/bin/chromium', name: 'System Chromium' },
-    { path: '/usr/bin/chromium-browser', name: 'System Chromium Browser' },
-    { path: '/usr/bin/google-chrome-stable', name: 'Google Chrome Stable' },
-    { path: '/usr/bin/google-chrome', name: 'Google Chrome' },
-    { path: '/usr/local/bin/chromium', name: 'Local Chromium' },
-    { path: '/usr/local/bin/chromium-browser', name: 'Local Chromium Browser' }
-  ];
+  const possibleChromePaths = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    process.env.CHROME_BIN,
+    process.env.CHROME_PATH,
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/local/bin/google-chrome-stable',
+    '/usr/local/bin/google-chrome',
+    '/usr/local/bin/chromium-browser',
+    '/usr/local/bin/chromium'
+  ].filter(Boolean);
 
-  // Find the first existing Chrome path with detailed logging
   let chromePath = null;
-  for (const { path, name } of chromePaths) {
-    if (!path) continue;
-    
-    const exists = require('fs').existsSync(path);
-    console.log(`Checking ${name} at ${path}: ${exists ? 'Found' : 'Not found'}`);
-    
-    if (exists) {
-      chromePath = path;
-      console.log(`✅ Using ${name} at: ${path}`);
-      break;
+  
+  // First try using 'which' command to find Chrome
+  try {
+    const { execSync } = require('child_process');
+    const chromeBin = execSync('which google-chrome-stable || which google-chrome || which chromium-browser || which chromium', { timeout: 5000 }).toString().trim();
+    if (chromeBin) {
+      chromePath = chromeBin;
+      console.log(`🔍 Found Chrome via 'which' command: ${chromePath}`);
+    }
+  } catch (e) {
+    console.log('ℹ️ Could not find Chrome using which command, falling back to path checking');
+  }
+
+  // If which didn't find it, check possible paths
+  if (!chromePath) {
+    for (const path of possibleChromePaths) {
+      try {
+        await fs.promises.access(path, fs.constants.X_OK);
+        chromePath = path;
+        console.log(`✅ Found Chrome at: ${chromePath}`);
+        break;
+      } catch (e) {
+        console.log(`❌ Chrome not found at: ${path}`);
+      }
     }
   }
   
-  // If no Chrome found and we're in Railway, use the installed Chromium
+  // If still no Chrome found and we're in Railway, use the installed Chromium
   if (!chromePath && (process.env.IS_RAILWAY || process.env.RAILWAY)) {
-    chromePath = '/usr/bin/chromium';
+    chromePath = '/usr/bin/google-chrome-stable';
     console.log(`🚂 Railway environment detected, defaulting to: ${chromePath}`);
   }
 
@@ -73,31 +93,37 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     console.warn('⚠️ No Chrome/Chromium executable found in common locations');
   }
 
-  // Enhanced launch options for better stability
+  // Enhanced launch options for better stability in Docker
   const launchOptions = {
-    headless: 'new',
+    headless: process.env.HEADLESS !== 'false' ? 'new' : false,
     ignoreHTTPSErrors: true,
     executablePath: chromePath,
     timeout: 30000, // 30 seconds
     dumpio: true, // pipe browser process stdout and stderr
     args: [
+      // Essential flags
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
+      
+      // Performance flags
       '--disable-gpu',
       '--disable-software-rasterizer',
       '--disable-features=site-per-process',
+      '--disable-features=IsolateOrigins',
       '--shm-size=3gb',
+      
+      // Security flags
       '--disable-web-security',
-      '--disable-setuid-sandbox',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--remote-debugging-port=9222',
-      '--remote-debugging-address=0.0.0.0',
       '--disable-blink-features=AutomationControlled',
+      '--password-store=basic',
+      '--use-mock-keychain',
+      
+      // UI/UX flags
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
       '--disable-infobars',
       '--window-size=1920,1080',
       '--start-maximized',
@@ -105,17 +131,42 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       '--disable-notifications',
       '--disable-extensions',
       '--mute-audio',
+      
+      // Network flags
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-client-side-phishing-detection',
       '--disable-default-apps',
-      '--disable-hang-monitor',
       '--disable-sync',
       '--metrics-recording-only',
       '--no-default-browser-check',
       '--safebrowsing-disable-auto-update',
-      '--password-store=basic',
-      '--use-mock-keychain'
+      
+      // Debugging flags (can be removed in production)
+      '--remote-debugging-port=9222',
+      '--remote-debugging-address=0.0.0.0',
+      '--enable-logging',
+      '--v=1',
+      
+      // Additional flags for Railway/Docker
+      '--disable-hang-monitor',
+      '--disable-renderer-backgrounding',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-breakpad',
+      '--disable-component-update',
+      '--disable-crash-reporter',
+      '--disable-dev-shm-usage',
+      '--disable-ipc-flooding-protection',
+      '--disable-renderer-backgrounding',
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--force-color-profile=srgb',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--no-pings',
+      '--no-sandbox',
+      '--no-zygote',
+      '--safebrowsing-disable-auto-update'
     ],
     defaultViewport: {
       width: 1920,
@@ -125,6 +176,11 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       isLandscape: false,
       isMobile: false,
     },
+    // Add more stability options
+    ignoreDefaultArgs: ['--enable-automation'],
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
     ...opts.launchOptions,
   };
   

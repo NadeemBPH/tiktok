@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: tiktok-scraper
+    environment:
+      - NODE_ENV=development
+      - PUPPETEER_SKIP_CHRONIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+      - CHROME_PATH=/usr/bin/google-chrome-stable
+      - CHROME_BIN=/usr/bin/google-chrome-stable
+      - NO_SANDBOX=true
+      - DISPLAY=:99
+      - TZ=UTC
+    ports:
+      - "3000:3000"
+      - "9222:9222"  # For remote debugging
+    volumes:
+      - .:/app
+      - /app/node_modules
+    working_dir: /app
+    # Uncomment the following if you need to run in development mode with file watching
+    # command: sh -c "npm install && npm run dev"
+    # Uncomment the following if you need to run tests
+    # command: sh -c "npm test"
+    # Uncomment the following to run the app in production mode
+    command: sh -c "Xvfb :99 -screen 0 1280x800x24 -ac -listen tcp -nolisten unix & node server.js"
+    # Health check to ensure the app is running
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Uncomment the following if you need a database
+  # db:
+  #   image: mongo:latest
+  #   container_name: mongo
+  #   ports:
+  #     - "27017:27017"
+  #   volumes:
+  #     - mongodb_data:/data/db
+  #   environment:
+  #     - MONGO_INITDB_ROOT_USERNAME=root
+  #     - MONGO_INITDB_ROOT_PASSWORD=example
+
+# Uncomment if using volumes for databases
+# volumes:
+#   mongodb_data:
