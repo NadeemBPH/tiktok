@@ -4,12 +4,12 @@ FROM ghcr.io/puppeteer/puppeteer:21.7.0
 ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
-# Prepare writable data directory for SQLite
-RUN mkdir -p /data && chmod 777 /data
-ENV DB_FILE=/data/tiktok.db
-
 # App dir
 WORKDIR /app
+
+# Create writable data directory for SQLite under /app
+RUN mkdir -p /app/data
+ENV DB_FILE=/app/data/tiktok.db
 
 # Only copy package files first for better layer caching
 COPY package*.json ./
