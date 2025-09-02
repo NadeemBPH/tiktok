@@ -1,45 +1,35 @@
 // services/puppeteerLogin.js
 const puppeteer = require("puppeteer");
+const fs = require("fs");
 require("dotenv").config();
 
 /**
- * Robust TikTok login using Puppeteer.
- * - If CONNECT_EXISTING_CHROME=true it will try to connect to a running Chrome via remote debugging
- *   and open a NEW TAB there. If connection fails it falls back to launching a new browser.
- * - When connected to existing Chrome we DO NOT close the browser (only the page/tab).
- *
- * Usage:
- * 1) Start Chrome with remote debugging:
- *    Linux:
- *      /usr/bin/google-chrome-stable --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-user-data
- *    Mac:
- *      /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-user-data
- *    Windows (PowerShell):
- *      "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome-user-data"
- *
- * 2) Set env:
- *    CONNECT_EXISTING_CHROME=true
- *    CONNECTED_CHROME_URL=http://127.0.0.1:9222   # optional
- *
- * Then call loginTikTok(loginUsername, loginPassword).
+ * Enhanced TikTok login using Puppeteer with VPN/proxy support.
+ * - Supports proxy configuration for VPN environments
+ * - Enhanced error handling for blocked regions
+ * - Improved login flow with better selectors
+ * - Better session management
  */
 async function loginTikTok(loginUsername, loginPassword, opts = {}) {
-  console.log('🚀 Starting TikTok login process...');
+  console.log('🚀 Starting enhanced TikTok login process...');
   console.log('Environment:', {
     NODE_ENV: process.env.NODE_ENV,
     IS_RAILWAY: process.env.IS_RAILWAY || 'false',
-    RAILWAY: process.env.RAILWAY || 'false'
+    RAILWAY: process.env.RAILWAY || 'false',
+    USE_PROXY: process.env.USE_PROXY || 'false'
   });
+  
   const HEADLESS_ENV = (process.env.HEADLESS ?? "true").toLowerCase() === "true";
-  const DEFAULT_TIMEOUT = parseInt(process.env.PUPPETEER_TIMEOUT || "60000", 10); // 60s
+  const DEFAULT_TIMEOUT = parseInt(process.env.PUPPETEER_TIMEOUT || "60000", 10);
   const connectExisting = (process.env.CONNECT_EXISTING_CHROME === "true") || opts.connectExisting;
+  const useProxy = (process.env.USE_PROXY === "true") || opts.useProxy;
 
   const remoteDebuggerUrl = process.env.CONNECTED_CHROME_URL || opts.connectedChromeUrl || "http://127.0.0.1:9222";
 
   let browser;
   let connectedToExisting = false;
 
-  console.log('Checking for Chrome/Chromium in common locations...');
+  console.log('🔍 Checking for Chrome/Chromium in common locations...');
   
   const possibleChromePaths = [
     process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -63,7 +53,7 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     const chromeBin = execSync('which google-chrome-stable || which google-chrome || which chromium-browser || which chromium', { timeout: 5000 }).toString().trim();
     if (chromeBin) {
       chromePath = chromeBin;
-      console.log(`🔍 Found Chrome via 'which' command: ${chromePath}`);
+      console.log(`✅ Found Chrome via 'which' command: ${chromePath}`);
     }
   } catch (e) {
     console.log('ℹ️ Could not find Chrome using which command, falling back to path checking');
@@ -93,13 +83,13 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     console.warn('⚠️ No Chrome/Chromium executable found in common locations');
   }
 
-  // Enhanced launch options for better stability in Docker
+  // Enhanced launch options with VPN/proxy support
   const launchOptions = {
     headless: process.env.HEADLESS !== 'false' ? 'new' : false,
     ignoreHTTPSErrors: true,
     executablePath: chromePath,
-    timeout: 30000, // 30 seconds
-    dumpio: true, // pipe browser process stdout and stderr
+    timeout: 30000,
+    dumpio: true,
     args: [
       // Essential flags
       '--no-sandbox',
@@ -142,31 +132,22 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       '--no-default-browser-check',
       '--safebrowsing-disable-auto-update',
       
-      // Debugging flags (can be removed in production)
-      '--remote-debugging-port=9222',
-      '--remote-debugging-address=0.0.0.0',
-      '--enable-logging',
-      '--v=1',
-      
-      // Additional flags for Railway/Docker
-      '--disable-hang-monitor',
-      '--disable-renderer-backgrounding',
+      // VPN/Proxy support flags
       '--disable-backgrounding-occluded-windows',
       '--disable-breakpad',
       '--disable-component-update',
       '--disable-crash-reporter',
-      '--disable-dev-shm-usage',
       '--disable-ipc-flooding-protection',
-      '--disable-renderer-backgrounding',
       '--enable-features=NetworkService,NetworkServiceInProcess',
       '--force-color-profile=srgb',
-      '--metrics-recording-only',
-      '--mute-audio',
-      '--no-default-browser-check',
       '--no-pings',
-      '--no-sandbox',
-      '--no-zygote',
-      '--safebrowsing-disable-auto-update'
+      '--safebrowsing-disable-auto-update',
+      
+      // Debugging flags (can be removed in production)
+      '--remote-debugging-port=9222',
+      '--remote-debugging-address=0.0.0.0',
+      '--enable-logging',
+      '--v=1'
     ],
     defaultViewport: {
       width: 1920,
@@ -176,84 +157,132 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       isLandscape: false,
       isMobile: false,
     },
-    // Add more stability options
     ignoreDefaultArgs: ['--enable-automation'],
     handleSIGINT: false,
     handleSIGTERM: false,
     handleSIGHUP: false,
     ...opts.launchOptions,
   };
-  
-  console.log('Launch options prepared:', JSON.stringify({
-    ...launchOptions,
-    // Don't log sensitive data
-    args: launchOptions.args,
-    executablePath: chromePath ? 'set' : 'not set'
-  }, null, 2));
 
-  // Set the executable path if found
-  if (chromePath) {
-    console.log(`Using Chrome at: ${chromePath}`);
-    launchOptions.executablePath = chromePath;
-  } else {
-    console.warn('No Chrome/Chromium executable found in common locations. Letting Puppeteer handle it.');
+  // Add proxy configuration if enabled
+  if (useProxy) {
+    const proxyServer = process.env.PROXY_SERVER || opts.proxyServer;
+    const proxyUsername = process.env.PROXY_USERNAME || opts.proxyUsername;
+    const proxyPassword = process.env.PROXY_PASSWORD || opts.proxyPassword;
+    
+    if (proxyServer) {
+      console.log(`🌐 Using proxy: ${proxyServer}`);
+      launchOptions.args.push(`--proxy-server=${proxyServer}`);
+      
+      // If proxy requires authentication, we'll handle it in the page
+      if (proxyUsername && proxyPassword) {
+        console.log('🔐 Proxy authentication enabled');
+      }
+    } else {
+      console.warn('⚠️ Proxy enabled but PROXY_SERVER not configured');
+    }
   }
+  
+  console.log('🚀 Launch options prepared with enhanced VPN support');
 
   try {
     if (connectExisting) {
       try {
-        // try to connect to running chrome
         browser = await puppeteer.connect({
           browserURL: remoteDebuggerUrl,
           defaultViewport: null,
           ...opts.connectOptions,
         });
         connectedToExisting = true;
-        // console.log("Connected to existing Chrome at", remoteDebuggerUrl);
+        console.log("✅ Connected to existing Chrome at", remoteDebuggerUrl);
       } catch (err) {
-        console.warn("Could not connect to existing Chrome:", err.message, " — falling back to launching.");
+        console.warn("❌ Could not connect to existing Chrome:", err.message, " — falling back to launching.");
         connectedToExisting = false;
       }
     }
 
     if (!browser) {
-      // launch a new browser if not connected
       browser = await puppeteer.launch(launchOptions);
+      console.log("✅ Launched new browser instance");
     }
 
     const page = await browser.newPage();
 
-    // sensible defaults
+    // Enhanced user agent and viewport
     await page.setViewport({ width: 1280, height: 800 });
     await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
-    // increase navigation timeout
+    // Set timeouts
     page.setDefaultNavigationTimeout(DEFAULT_TIMEOUT);
     page.setDefaultTimeout(DEFAULT_TIMEOUT);
 
-    // Try the same robust login flow as before
+    // Handle proxy authentication if needed
+    if (useProxy && process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
+      await page.authenticate({
+        username: process.env.PROXY_USERNAME,
+        password: process.env.PROXY_PASSWORD
+      });
+    }
+
+    // Enhanced login URLs with better fallback
     const loginUrls = [
       "https://www.tiktok.com/login/phone-or-email/email",
       "https://www.tiktok.com/login/phone-or-email/phone",
       "https://www.tiktok.com/login",
+      "https://www.tiktok.com/foryou",
     ];
 
     let loaded = false;
+    let loginPage = null;
+    
     for (const url of loginUrls) {
       try {
+        console.log(`🔗 Attempting to load: ${url}`);
         await page.goto(url, { waitUntil: "networkidle2", timeout: DEFAULT_TIMEOUT });
-        loaded = true;
-        break;
+        
+        // Check if we're already logged in
+        const cookies = await page.cookies();
+        const sessionCookie = cookies.find((c) => c.name === "sessionid" || c.name === "session_id" || c.name === "sid_tt");
+        
+        if (sessionCookie) {
+          console.log("✅ Already logged in, found session cookie");
+          loaded = true;
+          loginPage = url;
+          break;
+        }
+        
+        // Check if we're on a login page
+        const loginElements = await page.$$('input[name="email"], input[name="username"], input[type="password"]');
+        if (loginElements.length > 0) {
+          console.log(`✅ Found login form on: ${url}`);
+          loaded = true;
+          loginPage = url;
+          break;
+        }
+        
+        // If we're on the main page, try to find login button
+        const loginButton = await page.$('a[href*="login"], button[class*="login"]');
+        if (loginButton) {
+          console.log(`✅ Found login button on: ${url}`);
+          await loginButton.click();
+          await page.waitForTimeout(2000);
+          loaded = true;
+          loginPage = url;
+          break;
+        }
+        
       } catch (e) {
-        // try next url
+        console.log(`❌ Failed to load ${url}: ${e.message}`);
       }
     }
+    
     if (!loaded) {
-      throw new Error("Failed to reach TikTok login page. Network or site blocking?");
+      throw new Error("Failed to reach TikTok login page. Network or site blocking? Try using a VPN.");
     }
 
+    // Enhanced selectors for better compatibility
     const usernameSelectors = [
       'input[name="email"]',
       'input[name="username"]',
@@ -261,6 +290,9 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       'input[placeholder*="Email"]',
       'input[placeholder*="email"]',
       'input[placeholder*="Phone"]',
+      'input[placeholder*="phone"]',
+      'input[data-testid*="email"]',
+      'input[data-testid*="username"]',
     ];
 
     const passwordSelectors = [
@@ -268,67 +300,101 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       'input[type="password"]',
       'input[placeholder*="Password"]',
       'input[placeholder*="password"]',
+      'input[data-testid*="password"]',
     ];
 
-    async function tryType(selectors, value) {
+    async function tryType(selectors, value, fieldName) {
       for (const sel of selectors) {
         try {
           const el = await page.$(sel);
           if (el) {
+            console.log(`✅ Found ${fieldName} field: ${sel}`);
             await el.click({ clickCount: 3 }).catch(() => {});
             await el.focus();
-            await page.evaluate((s) => { const e = document.querySelector(s); if (e) e.value = ""; }, sel).catch(() => {});
-            await page.type(sel, value, { delay: 80 });
+            await page.evaluate((s) => { 
+              const e = document.querySelector(s); 
+              if (e) e.value = ""; 
+            }, sel).catch(() => {});
+            await page.type(sel, value, { delay: 100 });
             return true;
           }
         } catch (e) {
-          // ignore and continue trying
+          console.log(`❌ Failed to type in ${sel}: ${e.message}`);
         }
       }
       return false;
     }
 
-    const typedUser = await tryType(usernameSelectors, loginUsername);
-    const typedPass = await tryType(passwordSelectors, loginPassword);
+    console.log('📝 Attempting to fill login form...');
+    const typedUser = await tryType(usernameSelectors, loginUsername, "username");
+    const typedPass = await tryType(passwordSelectors, loginPassword, "password");
 
     if (!typedUser || !typedPass) {
-      // try clicking fallback "Use phone / email" etc., then re-try
+      console.log('🔄 Trying fallback login methods...');
+      
+      // Try clicking fallback "Use phone / email" etc., then re-try
       const fallbackButtons = [
         "//button[contains(., 'Use phone / email') or contains(., 'Use phone or email') or contains(., 'Email / phone')]",
         "//a[contains(., 'Use phone / email')]",
+        "//button[contains(., 'Log in with email')]",
+        "//button[contains(., 'Continue with email')]",
       ];
+      
       for (const xpath of fallbackButtons) {
         try {
           const els = await page.$x(xpath);
           if (els && els.length) {
+            console.log(`✅ Clicking fallback button: ${xpath}`);
             await els[0].click();
-            await page.waitForTimeout(1000);
+            await page.waitForTimeout(2000);
+            break;
           }
-        } catch (e) {}
+        } catch (e) {
+          console.log(`❌ Failed to click fallback button: ${e.message}`);
+        }
       }
-      await tryType(usernameSelectors, loginUsername);
-      await tryType(passwordSelectors, loginPassword);
+      
+      // Re-try typing after fallback
+      await tryType(usernameSelectors, loginUsername, "username (retry)");
+      await tryType(passwordSelectors, loginPassword, "password (retry)");
     }
 
-    // Try pressing Enter, then click buttons if needed
-    try { await page.keyboard.press("Enter"); } catch (e) {}
+    // Enhanced submit process
+    console.log('🚀 Attempting to submit login form...');
+    
+    // Try pressing Enter first
+    try { 
+      await page.keyboard.press("Enter"); 
+      console.log('✅ Pressed Enter key');
+    } catch (e) {
+      console.log('❌ Failed to press Enter: ${e.message}');
+    }
+    
+    // Try clicking submit buttons
     const submitSelectors = [
       'button[type="submit"]',
       'button[role="button"]',
       'button[class*="login"]',
       'button[class*="submit"]',
+      'button[data-testid*="login"]',
+      'button[data-testid*="submit"]',
     ];
+    
     for (const sel of submitSelectors) {
       try {
         const el = await page.$(sel);
         if (el) {
+          console.log(`✅ Clicking submit button: ${sel}`);
           await el.click();
           break;
         }
-      } catch (e) {}
+      } catch (e) {
+        console.log(`❌ Failed to click submit button ${sel}: ${e.message}`);
+      }
     }
 
-    // After triggering login, poll for 'sessionid' cookie
+    // Enhanced session cookie detection
+    console.log('🔍 Waiting for session cookie...');
     const checkInterval = 1000;
     const maxChecks = Math.ceil(DEFAULT_TIMEOUT / checkInterval);
     let sessionCookie = null;
@@ -336,54 +402,87 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     for (let i = 0; i < maxChecks; i++) {
       const cookies = await page.cookies();
       sessionCookie = cookies.find((c) => c.name === "sessionid" || c.name === "session_id" || c.name === "sid_tt");
-      if (sessionCookie) break;
+      
+      if (sessionCookie) {
+        console.log(`✅ Found session cookie: ${sessionCookie.name}`);
+        break;
+      }
+      
+      // Check for captcha/verification
       const bodyText = await page.evaluate(() => document.body.innerText || "");
       if (/captcha|verify|verification|2fa|two-step/i.test(bodyText)) {
         throw new Error("TikTok displayed a captcha/verification step. Manual interaction required (use HEADLESS=false to inspect).");
       }
+      
+      // Check for login errors
+      if (/incorrect|invalid|wrong|failed/i.test(bodyText)) {
+        throw new Error("Login failed: Invalid credentials or account locked.");
+      }
+      
       await page.waitForTimeout(checkInterval);
     }
 
     if (!sessionCookie) {
-      // As fallback try to navigate to profile page for the loginUsername to generate cookies
+      // Fallback: try to navigate to profile page
+      console.log('🔄 Fallback: Navigating to profile page...');
       try {
-        await page.goto("https://www.tiktok.com/@" + encodeURIComponent(loginUsername), { waitUntil: "networkidle2", timeout: 8000 });
+        await page.goto("https://www.tiktok.com/@" + encodeURIComponent(loginUsername), { 
+          waitUntil: "networkidle2", 
+          timeout: 8000 
+        });
         const cookies = await page.cookies();
         sessionCookie = cookies.find((c) => c.name === "sessionid" || c.name === "session_id" || c.name === "sid_tt");
-      } catch (e) {}
+      } catch (e) {
+        console.log(`❌ Fallback navigation failed: ${e.message}`);
+      }
     }
 
     if (!sessionCookie) {
       const allCookies = await page.cookies();
-      // close only the page/tab we created
+      console.log('❌ Available cookies:', allCookies.map(c => ({ name: c.name, domain: c.domain })));
+      
+      // Cleanup
       try { await page.close(); } catch (_) {}
       if (!connectedToExisting) {
         try { await browser.close(); } catch (_) {}
       }
-      throw new Error("Login did not produce session cookie (sessionid). Possibly captcha/2FA, wrong selectors, or site changed. Cookies: " + JSON.stringify(allCookies.map(c => ({ name: c.name, domain: c.domain }))));
+      
+      throw new Error("Login did not produce session cookie. Possible issues:\n" +
+        "1. Captcha/2FA required\n" +
+        "2. Wrong credentials\n" +
+        "3. Account locked\n" +
+        "4. TikTok blocking requests (try VPN)\n" +
+        "5. Site structure changed");
     }
 
-    // Gather cookies to return
+    // Gather all cookies
     const cookies = await page.cookies();
+    console.log(`✅ Login successful! Found ${cookies.length} cookies`);
 
-    // IMPORTANT: if we connected to existing browser DON'T close the browser.
-    // Close only the page/tab we opened to be polite.
+    // Cleanup
     try { await page.close(); } catch (_) {}
-
     if (!connectedToExisting) {
-      // If we launched a fresh browser then close it (we already closed the page)
       try { await browser.close(); } catch (_) {}
-    } else {
-      // If connected to existing Chrome we leave the browser running
-      // (but we already closed the page); this preserves the user's browser.
     }
 
     return cookies;
   } catch (err) {
-    // ensure cleanup on failure: if we launched browser (not connected), close it
+    console.error('❌ Login failed:', err.message);
+    
+    // Enhanced error handling
+    if (err.message.includes('ERR_CONNECTION_REFUSED') || err.message.includes('ERR_NAME_NOT_RESOLVED')) {
+      throw new Error("Network connection failed. TikTok may be blocked in your region. Please use a VPN.");
+    } else if (err.message.includes('ERR_TIMED_OUT')) {
+      throw new Error("Request timed out. TikTok servers may be slow or blocking requests. Try again later or use a VPN.");
+    } else if (err.message.includes('ERR_SSL_PROTOCOL_ERROR')) {
+      throw new Error("SSL error. This may be due to network restrictions. Try using a VPN.");
+    }
+    
+    // Cleanup on failure
     try {
       if (browser && !connectedToExisting) await browser.close();
     } catch (_) {}
+    
     throw err;
   }
 }

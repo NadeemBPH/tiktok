@@ -4,14 +4,21 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
     "deploy": "node server.js",
     "postinstall": "[ -f node_modules/puppeteer/install.js ] && node node_modules/puppeteer/install.js || echo 'Skipping Puppeteer install'"
   },
-  "keywords": [],
+  "keywords": [
+    "tiktok",
+    "scraper",
+    "puppeteer",
+    "vpn",
+    "proxy",
+    "social-media",
+    "data-extraction"
+  ],
   "author": "",
   "license": "ISC",
-  "description": "TikTok Scraper with Puppeteer",
+  "description": "Enhanced TikTok Scraper with VPN/proxy support for regions where TikTok is blocked",
   "engines": {
     "node": ">=16.0.0"
   },
@@ -36,7 +43,15 @@
       "--no-first-run",
       "--no-zygote",
       "--single-process",
-      "--disable-gpu"
+      "--disable-gpu",
+      "--disable-web-security",
+      "--disable-blink-features=AutomationControlled",
+      "--window-size=1920,1080",
+      "--start-maximized",
+      "--disable-popup-blocking",
+      "--disable-notifications",
+      "--disable-extensions",
+      "--mute-audio"
     ]
   }
 }
