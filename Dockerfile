@@ -1,46 +1,23 @@
-# Use the official Node.js image
-FROM node:18-slim
+# Use Puppeteer's official image with Chromium preinstalled
+FROM ghcr.io/puppeteer/puppeteer:21.7.0
 
-# Install required system packages (headless deps for Chromium)
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    ca-certificates \
-    xvfb \
-    xauth \
-    libnss3 \
-    libxss1 \
-    libasound2 \
-    libx11-xcb1 \
-    libxcb-dri3-0 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libxdamage1 \
-    libxfixes3 \
-    libxcomposite1 \
-    libxi6 \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# Do NOT skip Chromium download; let Puppeteer manage the matching version
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
 ENV NODE_ENV=production
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
-# Create app directory
+# App dir
 WORKDIR /app
 
-# Copy package files
+# Only copy package files first for better layer caching
 COPY package*.json ./
 
-# Install dependencies (Puppeteer will download Chromium here)
-RUN npm install
+# Install deps
+RUN npm ci --only=production || npm install --only=production
 
-# Copy app source
+# Copy the rest of the app
 COPY . .
 
-# Expose the app port
+# Expose service port (matches server.js default)
 EXPOSE 4000
 
-# Start the application with xvfb-run
-CMD ["xvfb-run", "-a", "node", "server.js"]
+# Start the app (Chromium is available in the base image; headless runs without Xvfb)
+CMD ["node", "server.js"]
