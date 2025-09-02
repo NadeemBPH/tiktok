@@ -9,198 +9,146 @@ const {
 const TikTokUser = require("../models/TikTokUser");
 const TikTokVideo = require("../models/TikTokVideo");
 
+// simple in-memory job store (resets on restart)
+const jobs = new Map();
+
+router.get('/ping', (req, res) => res.json({ ok: true }));
+
+router.get('/job/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ success: false, error: 'job not found' });
+  res.json(job);
+});
+
+function newJob() {
+  const id = Math.random().toString(36).slice(2);
+  const job = { id, status: 'pending', startedAt: new Date().toISOString() };
+  jobs.set(id, job);
+  return job;
+}
+
+function completeJob(id, payload) {
+  const job = jobs.get(id);
+  if (job) {
+    job.status = 'completed';
+    job.completedAt = new Date().toISOString();
+    job.result = payload;
+    jobs.set(id, job);
+  }
+}
+
+function failJob(id, errorMessage) {
+  const job = jobs.get(id);
+  if (job) {
+    job.status = 'failed';
+    job.completedAt = new Date().toISOString();
+    job.error = errorMessage;
+    jobs.set(id, job);
+  }
+}
+
 /**
- * POST /auth/login-scrape
- * body: { loginUsername, loginPassword, targetUsername, scrapeVideos = true }
- *
- * Enhanced login and scraping with VPN support.
- * Logs in using loginUsername/loginPassword, then scrapes targetUsername profile + videos,
- * saves them to SQLite DB with comprehensive data.
+ * POST /auth/login-scrape (async)
+ * Accepts request, returns 202 with jobId immediately to avoid 15s ingress timeout.
+ * Client polls /auth/job/:id until completed/failed.
  */
 router.post("/login-scrape", async (req, res) => {
-  try {
-    console.log("🚀 Received /auth/login-scrape request", req.body);
-    const { loginUsername, loginPassword, targetUsername, scrapeVideos = true } = req.body || {};
-    
-    if (!loginUsername || !loginPassword || !targetUsername) {
-      return res.status(400).json({ 
-        error: "loginUsername, loginPassword and targetUsername are required",
-        example: {
-          loginUsername: "your_email@example.com",
-          loginPassword: "your_password",
-          targetUsername: "tiktok_username",
-          scrapeVideos: true
-        }
-      });
-    }
+  const job = newJob();
+  res.status(202).json({ accepted: true, jobId: job.id, poll: `/auth/job/${job.id}` });
 
-    console.log(`📧 Login: ${loginUsername}`);
-    console.log(`🎯 Target: @${targetUsername}`);
-    console.log(`🎬 Scrape videos: ${scrapeVideos}`);
+  // run in background (no await)
+  (async () => {
+    try {
+      const { loginUsername, loginPassword, targetUsername, scrapeVideos = true } = req.body || {};
+      if (!loginUsername || !loginPassword || !targetUsername) {
+        failJob(job.id, "loginUsername, loginPassword and targetUsername are required");
+        return;
+      }
 
-    // 1) Enhanced login with puppeteer
-    console.log("🔐 Starting TikTok login...");
-    const cookies = await loginTikTok(loginUsername, loginPassword, {
-      useProxy: process.env.USE_PROXY === "true",
-      proxyServer: process.env.PROXY_SERVER,
-      proxyUsername: process.env.PROXY_USERNAME,
-      proxyPassword: process.env.PROXY_PASSWORD
-    });
-
-    console.log(`✅ Login successful! Got ${cookies.length} cookies`);
-
-    // 2) Enhanced scraping based on options
-    let scraped;
-    if (scrapeVideos) {
-      console.log("🎬 Scraping profile and videos...");
-      scraped = await fetchProfileAndVideosFromCookies(cookies, targetUsername, {
+      const cookies = await loginTikTok(loginUsername, loginPassword, {
         useProxy: process.env.USE_PROXY === "true",
         proxyServer: process.env.PROXY_SERVER,
         proxyUsername: process.env.PROXY_USERNAME,
         proxyPassword: process.env.PROXY_PASSWORD
       });
-    } else {
-      console.log("👤 Scraping profile only...");
-      scraped = await fetchUserProfileFromCookies(cookies, targetUsername, {
-        useProxy: process.env.USE_PROXY === "true",
-        proxyServer: process.env.PROXY_SERVER,
-        proxyUsername: process.env.PROXY_USERNAME,
-        proxyPassword: process.env.PROXY_PASSWORD
-      });
-    }
 
-    // 3) Enhanced user data saving
-    const u = scraped.user || {};
-    const stat = scraped.userStats || {};
+      let scraped;
+      if (scrapeVideos) {
+        scraped = await fetchProfileAndVideosFromCookies(cookies, targetUsername, {
+          useProxy: process.env.USE_PROXY === "true",
+          proxyServer: process.env.PROXY_SERVER,
+          proxyUsername: process.env.PROXY_USERNAME,
+          proxyPassword: process.env.PROXY_PASSWORD
+        });
+      } else {
+        scraped = await fetchUserProfileFromCookies(cookies, targetUsername, {
+          useProxy: process.env.USE_PROXY === "true",
+          proxyServer: process.env.PROXY_SERVER,
+          proxyUsername: process.env.PROXY_USERNAME,
+          proxyPassword: process.env.PROXY_PASSWORD
+        });
+      }
 
-    console.log("💾 Saving user data...");
-    const [userRecord] = await TikTokUser.upsert({
-      uniqueId: u.uniqueId || u.unique_id || u.shortId || targetUsername,
-      nickname: u.nickname || u.displayName || u.screen_name,
-      avatarUrl: (u.avatarLarger || u.avatar || (u.avatarThumb && u.avatarThumb) || null),
-      signature: u.signature || "",
-      followingCount: stat.followingCount || stat.following || 0,
-      followerCount: stat.followerCount || stat.follower || 0,
-      heartCount: stat.heartCount || stat.heart || 0,
-      videoCount: stat.videoCount || stat.video || 0,
-      verified: !!u.verified,
-      private: !!u.private,
-      secUid: u.secUid || u.sec_uid,
-      userId: u.id || u.userId,
-      lastScraped: new Date(),
-      raw: scraped.rawState,
-    }, { returning: true });
+      const u = scraped.user || {};
+      const stat = scraped.userStats || {};
 
-    console.log(`✅ User saved: @${userRecord.uniqueId}`);
+      const [userRecord] = await TikTokUser.upsert({
+        uniqueId: u.uniqueId || u.unique_id || u.shortId || targetUsername,
+        nickname: u.nickname || u.displayName || u.screen_name,
+        avatarUrl: (u.avatarLarger || u.avatar || (u.avatarThumb && u.avatarThumb) || null),
+        signature: u.signature || "",
+        followingCount: stat.followingCount || stat.following || 0,
+        followerCount: stat.followerCount || stat.follower || 0,
+        heartCount: stat.heartCount || stat.heart || 0,
+        videoCount: stat.videoCount || stat.video || 0,
+        verified: !!u.verified,
+        private: !!u.private,
+        secUid: u.secUid || u.sec_uid,
+        userId: u.id || u.userId,
+        lastScraped: new Date(),
+        raw: scraped.rawState,
+      }, { returning: true });
 
-    // 4) Enhanced video saving (if videos were scraped)
-    let videoRecords = [];
-    if (scrapeVideos && scraped.videos && scraped.videos.length > 0) {
-      console.log(`🎬 Saving ${scraped.videos.length} videos...`);
-      
-      for (const v of scraped.videos) {
-        try {
-          // Extract hashtags and mentions from description
-          const hashtags = v.desc ? v.desc.match(/#\w+/g) || [] : [];
-          const mentions = v.desc ? v.desc.match(/@\w+/g) || [] : [];
-          
-          // Extract music info
-          const music = v.music || {};
-          
-          const rec = await TikTokVideo.upsert({
-            videoId: v.id,
-            description: v.desc,
-            createTime: v.createTime,
-            playUrl: v.video,
-            coverUrl: v.cover,
-            likeCount: v.stats && v.stats.diggCount ? v.stats.diggCount : (v.stats && v.stats.likes) || 0,
-            commentCount: v.stats && v.stats.commentCount ? v.stats.commentCount : 0,
-            shareCount: v.stats && v.stats.shareCount ? v.stats.shareCount : 0,
-            viewCount: v.stats && v.stats.playCount ? v.stats.playCount : 0,
-            duration: v.stats && v.stats.duration ? v.stats.duration : null,
-            musicTitle: music.title || null,
-            musicAuthor: music.authorName || null,
-            musicUrl: music.playUrl || null,
-            hashtags: hashtags,
-            mentions: mentions,
-            isPrivate: !!v.isPrivate,
-            isDownloaded: false,
-            lastScraped: new Date(),
-            raw: v.raw,
-            TikTokUserId: userRecord.id,
-          }, { returning: true });
-          videoRecords.push(rec);
-        } catch (err) {
-          console.warn(`❌ Failed saving video ${v.id}:`, err.message);
+      let saved = 0;
+      if (scrapeVideos && scraped.videos && scraped.videos.length > 0) {
+        for (const v of scraped.videos) {
+          try {
+            const hashtags = v.desc ? v.desc.match(/#\w+/g) || [] : [];
+            const mentions = v.desc ? v.desc.match(/@\w+/g) || [] : [];
+            const music = v.music || {};
+            await TikTokVideo.upsert({
+              videoId: v.id,
+              description: v.desc,
+              createTime: v.createTime,
+              playUrl: v.video,
+              coverUrl: v.cover,
+              likeCount: v.stats && v.stats.diggCount ? v.stats.diggCount : (v.stats && v.stats.likes) || 0,
+              commentCount: v.stats && v.stats.commentCount ? v.stats.commentCount : 0,
+              shareCount: v.stats && v.stats.shareCount ? v.stats.shareCount : 0,
+              viewCount: v.stats && v.stats.playCount ? v.stats.playCount : 0,
+              duration: v.stats && v.stats.duration ? v.stats.duration : null,
+              musicTitle: music.title || null,
+              musicAuthor: music.authorName || null,
+              musicUrl: music.playUrl || null,
+              hashtags,
+              mentions,
+              isPrivate: !!v.isPrivate,
+              isDownloaded: false,
+              lastScraped: new Date(),
+              raw: v.raw,
+              TikTokUserId: userRecord.id,
+            }, { returning: true });
+            saved++;
+          } catch (_) {}
         }
       }
-      
-      console.log(`✅ Saved ${videoRecords.length} videos`);
-    }
 
-    // 5) Enhanced response
-    const response = {
-      success: true,
-      message: "Scraped and saved successfully",
-      data: {
-        user: {
-          id: userRecord.id,
-          uniqueId: userRecord.uniqueId,
-          nickname: userRecord.nickname,
-          followerCount: userRecord.followerCount,
-          followingCount: userRecord.followingCount,
-          heartCount: userRecord.heartCount,
-          videoCount: userRecord.videoCount,
-          verified: userRecord.verified,
-          private: userRecord.private,
-          lastScraped: userRecord.lastScraped
-        },
-        videos: {
-          count: videoRecords.length,
-          saved: videoRecords.length
-        },
-        metadata: scraped.metadata || {
-          scrapedAt: new Date(),
-          targetUsername: targetUsername,
-          videoCount: videoRecords.length
-        }
-      }
-    };
-
-    console.log("🎉 Scraping completed successfully!");
-    res.json(response);
-    
-  } catch (err) {
-    console.error("❌ login-scrape error:", err);
-    
-    // Enhanced error responses
-    let statusCode = 500;
-    let errorMessage = err.message;
-    
-    if (err.message.includes('Network connection failed') || 
-        err.message.includes('blocked in your region')) {
-      statusCode = 403;
-      errorMessage = "TikTok is blocked in your region. Please use a VPN.";
-    } else if (err.message.includes('Invalid credentials') || 
-               err.message.includes('Login failed')) {
-      statusCode = 401;
-      errorMessage = "Invalid login credentials. Please check your username and password.";
-    } else if (err.message.includes('captcha') || 
-               err.message.includes('verification')) {
-      statusCode = 429;
-      errorMessage = "TikTok requires verification. Please try again later or use manual login.";
-    } else if (err.message.includes('timeout') || 
-               err.message.includes('timed out')) {
-      statusCode = 408;
-      errorMessage = "Request timed out. TikTok servers may be slow. Please try again.";
+      completeJob(job.id, { userId: userRecord.id, videosSaved: saved });
+    } catch (err) {
+      console.error('login-scrape async error:', err);
+      failJob(job.id, err.message);
     }
-    
-    res.status(statusCode).json({ 
-      success: false,
-      error: errorMessage,
-      timestamp: new Date().toISOString()
-    });
-  }
+  })();
 });
 
 /**

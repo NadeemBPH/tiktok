@@ -9,6 +9,10 @@ const app = express();
 app.use(bodyParser.json({ limit: "5mb" }));
 app.use(bodyParser.urlencoded({ extended: false }));
 
+// quick readiness and health
+app.get('/', (req, res) => res.json({ ok: true, service: 'tiktok-scraper' }));
+app.get('/health', (req, res) => res.json({ ok: true }));
+
 // routes
 app.use("/auth", require("./routes/auth"));
 app.use("/users", require("./routes/users"));
@@ -16,11 +20,16 @@ app.use("/users", require("./routes/users"));
 const PORT = process.env.PORT || 4000;
 
 async function start() {
-  // sync DB
+  console.log(`[boot] Starting service on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
+  // sync DB (no force), keep fast
   await sequelize.sync({ alter: true });
-  app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+  const server = app.listen(PORT, '0.0.0.0', () => console.log(`Server running on http://0.0.0.0:${PORT}`));
+  // increase timeouts to avoid 502 on long puppeteer operations
+  server.headersTimeout = 120000; // 120s
+  server.requestTimeout = 120000; // 120s
 }
 
 start().catch(err => {
   console.error("Failed to start:", err);
+  process.exit(1);
 });
