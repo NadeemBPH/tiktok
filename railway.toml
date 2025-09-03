@@ -4,9 +4,13 @@
 
 [deploy]
   startCommand = "node server.js"
-
+  healthcheckPath = "/health"
+  healthcheckTimeout = 60
+  restartTimeout = 300
+  
 [build.environment]
   NODE_ENV = "production"
+  PORT = "4000"
   IS_RAILWAY = "true"
   RAILWAY = "true"
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
@@ -15,9 +19,26 @@
   PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
   
 [build.docker]
-  # This ensures the Dockerfile is used for building the application
   dockerfile = "Dockerfile"
   
 [build.docker.buildArgs]
-  # Add any build args here if needed
   NODE_ENV = "production"
+  
+[deploy.healthcheck]
+  type = "http"
+  path = "/health"
+  timeout = 60
+  interval = 60s
+  threshold = 3
+  initialDelay = 30s
+  
+[deploy.resources]
+  # Adjust these based on your needs
+  cpu = 2
+  memory = 2048
+  
+[deploy.checks]
+  enabled = true
+  timeout = 60
+  interval = 30s
+  retries = 3
