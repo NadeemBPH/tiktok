@@ -50,6 +50,7 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   try {
     const { execSync } = require('child_process');
     const chromeBin = execSync('which google-chrome-stable || which google-chrome || which chromium-browser || which chromium', { timeout: 3000 }).toString().trim();
+    console.log("chromeBin",chromeBin)
     if (chromeBin) {
       chromePath = chromeBin;
       console.log(`✅ Found Chrome via 'which' command: ${chromePath}`);
@@ -57,7 +58,7 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   } catch (e) {
     console.log('ℹ️ Could not find Chrome using which command, falling back to path checking');
   }
-
+  console.log("chromePath",chromePath)
   if (!chromePath) {
     for (const path of possibleChromePaths) {
       try {
@@ -102,7 +103,7 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     const proxyServer = process.env.PROXY_SERVER || opts.proxyServer || 'http://185.199.229.156:7492';
     if (proxyServer) {
       console.log(`🔌 Using proxy server: ${proxyServer}`);
-      launchOptions.args.push(
+      await launchOptions.args.push(
         `--proxy-server=${proxyServer}`,
         '--proxy-bypass-list=<-loopback>',
         '--disable-features=IsolateOrigins,site-per-process',
@@ -127,52 +128,186 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     if (connectExisting || isProduction) {
       try {
         console.log('🔍 Attempting to connect to existing Chrome instance...');
-        browser = await puppeteer.connect({ 
-          browserURL: 'http://127.0.0.1:9222', 
-          defaultViewport: null, 
-          ...opts.connectOptions 
-        });
+        const connectOptions = {
+          browserURL: remoteDebuggerUrl,
+          defaultViewport: null,
+          ...opts.connectOptions
+        };
+        console.log('Connection options:', JSON.stringify(connectOptions, null, 2));
+        
+        // Add timeout to the connect attempt
+        const connectPromise = puppeteer.connect(connectOptions);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Connection timeout after 5 seconds')), 5000)
+        );
+        
+        browser = await Promise.race([connectPromise, timeoutPromise]);
+        
+        // Verify connection by getting browser version
+        const browserVersion = await browser.version();
+        console.log(`✅ Successfully connected to existing Chrome (${browserVersion})`);
         
         // Create a new page in the existing browser
-        const pages = await browser.pages();
-        const page = pages.length > 0 ? pages[0] : await browser.newPage();
-        await page.setViewport({ width: 1366, height: 768 });
-        
-        connectedToExisting = true;
-        console.log("✅ Connected to existing Chrome at", remoteDebuggerUrl);
-        
-        // Try to use the existing page
+        let page;
         try {
-          await page.goto('about:blank');
-          console.log('🔄 Using existing browser tab');
-          return { browser, page };
-        } catch (err) {
-          console.warn('⚠️ Could not use existing tab, falling back to new window');
-          await page.close();
+          const pages = await browser.pages();
+          page = pages.length > 0 ? pages[0] : await browser.newPage();
+          await page.setViewport({ width: 1366, height: 768 });
+          connectedToExisting = true;
+        } catch (pageError) {
+          console.warn('⚠️ Could not create page in existing browser, falling back to new instance:', pageError.message);
+          await browser.close();
+          connectedToExisting = false;
+        }
+        if (connectedToExisting) {
+          console.log("✅ Connected to existing Chrome at", remoteDebuggerUrl);
+          
+          // Try to use the existing page
+          try {
+            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10000 });
+            console.log('🔄 Using existing browser tab');
+            return { browser, page };
+          } catch (err) {
+            console.warn('⚠️ Could not use existing tab, falling back to new window:', err.message);
+            try {
+              await page.close();
+            } catch (e) {
+              console.warn('⚠️ Error closing page:', e.message);
+            }
+          }
         }
       } catch (err) {
-        console.warn("❌ Could not connect to existing Chrome:", err.message, " — falling back to launching new instance.");
+        console.warn("❌ Could not connect to existing Chrome:", err.message);
+        console.log('ℹ️ Falling back to launching new browser instance...');
         connectedToExisting = false;
-      }
+        
+        // Close any partial browser connection
+        if (browser) {
+          try {
+            await browser.close();
+          } catch (e) {
+            console.warn('⚠️ Error closing browser after failed connection:', e.message);
+          }
+        }
     }
 
     // If we get here, we need to launch a new browser instance
     console.log('🚀 Launching new browser instance with VPN support...');
     
+    // Ensure we have a clean slate for browser arguments
+    const vpnArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu',
+      '--disable-web-security',
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1920,1080',
+      '--start-maximized'
+    ];
+    
+    // Add VPN/proxy configuration if enabled
+    if (useProxy) {
+      const proxyServer = process.env.PROXY_SERVER || opts.proxyServer || 'http://185.199.229.156:7492';
+      if (proxyServer) {
+        console.log(`🔌 Configuring proxy server: ${proxyServer}`);
+        
+        // Add proxy authentication if credentials are provided
+        let finalProxyUrl = proxyServer;
+        if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
+          const proxyUrl = new URL(proxyServer);
+          proxyUrl.username = process.env.PROXY_USERNAME;
+          proxyUrl.password = process.env.PROXY_PASSWORD;
+          finalProxyUrl = proxyUrl.toString();
+          console.log('🔑 Added proxy authentication');
+        }
+        
+        console.log(`🌐 Final proxy URL: ${finalProxyUrl.replace(/:([^@]*)@/g, ':***@')}`);
+        
+        vpnArgs.push(
+          `--proxy-server=${finalProxyUrl}`,
+          '--proxy-bypass-list=<-loopback>',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-site-isolation-trials',
+          '--disable-web-security',
+          '--disable-blink-features=AutomationControlled',
+          '--ignore-certificate-errors',
+          '--ignore-ssl-errors',
+          '--enable-features=NetworkService',
+          '--no-proxy-server',
+          '--disable-http2',
+          '--enable-tcp-fast-open',
+          '--enable-http2-gzip-compression'
+        );
+        
+        console.log('✅ Proxy configuration applied');
+      } else {
+        console.warn('⚠️ Proxy enabled but no proxy server specified');
+      }
+    }
+    
     // Add extension directory if specified
     if (process.env.CHROME_EXTENSION_DIR) {
-      launchOptions.args.push(`--load-extension=${process.env.CHROME_EXTENSION_DIR}`);
+      vpnArgs.push(`--load-extension=${process.env.CHROME_EXTENSION_DIR}`);
       console.log('🔌 Loading Chrome extensions from:', process.env.CHROME_EXTENSION_DIR);
     }
 
     // Add user data directory to maintain extensions and cookies
     if (process.env.CHROME_USER_DATA_DIR) {
-      launchOptions.args.push(`--user-data-dir=${process.env.CHROME_USER_DATA_DIR}`);
+      vpnArgs.push(`--user-data-dir=${process.env.CHROME_USER_DATA_DIR}`);
       console.log('📁 Using Chrome user data from:', process.env.CHROME_USER_DATA_DIR);
     }
+    
+    // Update launch options with VPN arguments
+    launchOptions.args = [...new Set([...launchOptions.args, ...vpnArgs])];
+    
+    // Ensure no duplicate arguments
+    launchOptions.args = Array.from(new Set(launchOptions.args.map(arg => {
+      // Remove any existing proxy-server argument to avoid duplicates
+      if (arg.startsWith('--proxy-server=')) {
+        return `--proxy-server=${launchOptions.args.find(a => a.startsWith('--proxy-server='))?.split('=')[1] || ''}`;
+      }
+      return arg;
+    })));
+    
+    console.log('🔧 Final browser launch options:', JSON.stringify({
+      ...launchOptions,
+      args: launchOptions.args.map(arg => 
+        arg.includes('proxy') ? 
+          arg.replace(/(https?:\/\/)[^:]+:[^@]+@/g, '$1***:***@') : 
+          arg
+      )
+    }, null, 2));
+    
+    // Add error handling for browser launch
+    try {
+      console.log('🚀 Attempting to launch browser with VPN...');
 
-    browser = await puppeteer.launch(launchOptions);
-    console.log("✅ Launched new browser instance");
+      browser = await puppeteer.launch(launchOptions);
+      
+      // Verify proxy is working
+      const page = await browser.newPage();
+      console.log('🌐 Verifying proxy connection...');
+      
+      try {
+        await page.goto('http://httpbin.org/ip', { waitUntil: 'networkidle2', timeout: 30000 });
+        const content = await page.content();
+        console.log('🌍 IP Information:', content);
+        console.log('✅ Successfully launched browser with VPN/proxy');
+      } catch (e) {
+        console.warn('⚠️ Could not verify proxy connection:', e.message);
+        console.log('ℹ️ Continuing with browser launch...');
+      }
+      
+      return { browser, page };
+    } catch (error) {
+      console.error('❌ Failed to launch browser with VPN:', error);
+      if (browser) await browser.close();
+      throw new Error(`Failed to launch browser with VPN: ${error.message}`);
+    }
 
     const page = await browser.newPage();
     
@@ -632,10 +767,12 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       // Re-throw the original error
       throw error;
     }
-  } catch (err) {
+  }
+ } catch (err) {
     try { 
       if (browser && !connectedToExisting) await browser.close(); 
-    } catch (_) {}
+    } 
+    catch (_) {}
     throw err;
   }
 }
