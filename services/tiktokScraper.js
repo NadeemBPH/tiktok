@@ -79,12 +79,21 @@ async function fetchProfileAndVideosFromCookies(cookies, targetUsername, opts = 
     });
   }
 
+  // Ensure cookies is an array
+  if (!Array.isArray(cookies)) {
+    console.error('❌ Error: cookies parameter must be an array');
+    throw new Error('Invalid cookies parameter: expected an array');
+  }
+
   // set cookies for domain
   const formatted = cookies.map(c => {
     // ensure domain field present
-    if (!c.domain) c.domain = ".tiktok.com";
-    return c;
-  });
+    if (c && typeof c === 'object') {
+      if (!c.domain) c.domain = ".tiktok.com";
+      return c;
+    }
+    return null;
+  }).filter(Boolean); // Remove any null entries from invalid cookies
 
   console.log(`🍪 Setting ${formatted.length} cookies...`);
   await page.setCookie(...formatted);

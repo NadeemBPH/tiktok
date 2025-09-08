@@ -86,8 +86,9 @@ router.post("/login-scrape", async (req, res) => {
         failJob(job.id, `Login failed: ${loginError.message}`);
         return;
       }
-
+      console.log("loginResult", loginResult);
       const cookies = normalizeCookies(loginResult);
+      console.log("cookies", cookies);
       if (!cookies) {
         console.error('❌ Invalid cookies in login result');
         failJob(job.id, 'Login failed: No valid cookies received');

@@ -5,22 +5,12 @@ require("dotenv").config();
 
 /**
  * Enhanced TikTok login using Puppeteer with VPN/proxy support.
- * - Supports proxy configuration for VPN environments
- * - Enhanced error handling for blocked regions
- * - Improved login flow with better selectors
- * - Better session management
  */
 async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   console.log('🚀 Starting enhanced TikTok login process...');
-  console.log('Environment:', {
-    NODE_ENV: process.env.NODE_ENV,
-    IS_RAILWAY: process.env.IS_RAILWAY || 'false',
-    RAILWAY: process.env.RAILWAY || 'false',
-    USE_PROXY: process.env.USE_PROXY || 'false'
-  });
-  
   const isProduction = (process.env.NODE_ENV || '').toLowerCase() === 'production';
-  const DEFAULT_TIMEOUT = Math.min(parseInt(process.env.PUPPETEER_TIMEOUT || "45000", 10), 60000);
+  const envHeadless = (process.env.HEADLESS || 'true').toLowerCase() !== 'false';
+  const DEFAULT_TIMEOUT = Math.min(parseInt(process.env.PUPPETEER_TIMEOUT || "45000", 10), 90000);
   const connectExisting = (process.env.CONNECT_EXISTING_CHROME === "true") || opts.connectExisting;
   const useProxy = (process.env.USE_PROXY === "true") || opts.useProxy;
 
@@ -28,69 +18,26 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
 
   let browser;
   let connectedToExisting = false;
+  let page;
 
-  console.log('🔍 Checking for Chrome/Chromium in common locations...');
-  
-  const possibleChromePaths = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    process.env.CHROME_BIN,
-    process.env.CHROME_PATH,
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/usr/local/bin/google-chrome-stable',
-    '/usr/local/bin/google-chrome',
-    '/usr/local/bin/chromium-browser',
-    '/usr/local/bin/chromium'
-  ].filter(Boolean);
-
-  let chromePath = null;
-  
-  try {
-    const { execSync } = require('child_process');
-    const chromeBin = execSync('which google-chrome-stable || which google-chrome || which chromium-browser || which chromium', { timeout: 3000 }).toString().trim();
-    console.log("chromeBin",chromeBin)
-    if (chromeBin) {
-      chromePath = chromeBin;
-      console.log(`✅ Found Chrome via 'which' command: ${chromePath}`);
-    }
-  } catch (e) {
-    console.log('ℹ️ Could not find Chrome using which command, falling back to path checking');
-  }
-  console.log("chromePath",chromePath)
-  if (!chromePath) {
-    for (const path of possibleChromePaths) {
-      try {
-        await fs.promises.access(path, fs.constants.X_OK);
-        chromePath = path;
-        console.log(`✅ Found Chrome at: ${chromePath}`);
-        break;
-      } catch (e) {}
-    }
-  }
-
-  // Minimal, stable launch options for Railway
-  // Enhanced launch options to avoid detection
+  // Minimal, stable launch options
   const launchOptions = {
-    // headless: isProduction ? 'new' : (process.env.HEADLESS !== 'false' ? 'new' : false),
-    headless: "new", 
+    headless: envHeadless ? 'new' : (isProduction ? 'new' : false),
     ignoreHTTPSErrors: true,
     executablePath: '/usr/bin/google-chrome-stable',
-    timeout: Math.min(DEFAULT_TIMEOUT, 30000),
-    dumpio: true, // Enable verbose logging
+    timeout: 30000,
+    dumpio: false,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      '--window-size=1366,768',
+      '--disable-blink-features=AutomationControlled'
     ],
-    defaultViewport: { 
-      width: 1366, 
-      height: 768,
-      deviceScaleFactor: 1,
-      isMobile: false,
-      hasTouch: false
-    },
+    defaultViewport: { width: 1366, height: 768 },
     ignoreDefaultArgs: ['--enable-automation'],
     handleSIGINT: false,
     handleSIGTERM: false,
@@ -98,682 +45,132 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
     ...opts.launchOptions,
   };
 
-  // Enhanced Proxy configuration
+  // Proxy configuration (do NOT add --no-proxy-server)
   if (useProxy) {
-    const proxyServer = process.env.PROXY_SERVER || opts.proxyServer || 'http://185.199.229.156:7492';
+    const proxyServer = process.env.PROXY_SERVER || opts.proxyServer;
     if (proxyServer) {
-      console.log(`🔌 Using proxy server: ${proxyServer}`);
-      await launchOptions.args.push(
-        `--proxy-server=${proxyServer}`,
-        '--proxy-bypass-list=<-loopback>',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--disable-site-isolation-trials',
-        '--disable-web-security',
-        '--disable-blink-features=AutomationControlled'
-      );
-      
-      // Add proxy authentication if credentials are provided
-      if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
-        console.log('🔑 Proxy authentication enabled');
-      }
-    } else {
-      console.warn('⚠️ Proxy enabled but no proxy server specified. Running without proxy.');
+      launchOptions.args.push(`--proxy-server=${proxyServer}`);
     }
   }
 
-  console.log('🚀 Preparing browser launch options...');
+  // Helper: robust navigation with retries and staggered waitUntil
+  async function retryGoto(targetPage, url, attempts = 3) {
+    const strategies = ['domcontentloaded', 'networkidle0'];
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+      const waitUntil = strategies[Math.min(i, strategies.length - 1)];
+      try {
+        console.log(`🔗 goto attempt ${i + 1}/${attempts} (${waitUntil}): ${url}`);
+        const res = await targetPage.goto(url, { waitUntil, timeout: Math.min(DEFAULT_TIMEOUT, 60000) });
+        return res;
+      } catch (e) {
+        lastErr = e;
+        console.warn(`goto failed (${waitUntil}):`, e.message);
+        await targetPage.waitForTimeout(1000 + i * 500);
+      }
+    }
+    throw lastErr;
+  }
 
   try {
-    // First try to connect to existing Chrome instance
-    if (connectExisting || isProduction) {
+    // Launch browser
+    if (connectExisting && !isProduction) {
       try {
-        console.log('🔍 Attempting to connect to existing Chrome instance...');
-        const connectOptions = {
-          browserURL: remoteDebuggerUrl,
-          defaultViewport: null,
-          ...opts.connectOptions
-        };
-        console.log('Connection options:', JSON.stringify(connectOptions, null, 2));
-        
-        // Add timeout to the connect attempt
-        const connectPromise = puppeteer.connect(connectOptions);
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection timeout after 5 seconds')), 5000)
-        );
-        
-        browser = await Promise.race([connectPromise, timeoutPromise]);
-        
-        // Verify connection by getting browser version
-        const browserVersion = await browser.version();
-        console.log(`✅ Successfully connected to existing Chrome (${browserVersion})`);
-        
-        // Create a new page in the existing browser
-        let page;
-        try {
-          const pages = await browser.pages();
-          page = pages.length > 0 ? pages[0] : await browser.newPage();
-          await page.setViewport({ width: 1366, height: 768 });
-          connectedToExisting = true;
-        } catch (pageError) {
-          console.warn('⚠️ Could not create page in existing browser, falling back to new instance:', pageError.message);
-          await browser.close();
-          connectedToExisting = false;
-        }
-        if (connectedToExisting) {
-          console.log("✅ Connected to existing Chrome at", remoteDebuggerUrl);
-          
-          // Try to use the existing page
-          try {
-            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10000 });
-            console.log('🔄 Using existing browser tab');
-            return { browser, page };
-          } catch (err) {
-            console.warn('⚠️ Could not use existing tab, falling back to new window:', err.message);
-            try {
-              await page.close();
-            } catch (e) {
-              console.warn('⚠️ Error closing page:', e.message);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("❌ Could not connect to existing Chrome:", err.message);
-        console.log('ℹ️ Falling back to launching new browser instance...');
+        browser = await puppeteer.connect({ browserURL: remoteDebuggerUrl, defaultViewport: null, ...opts.connectOptions });
+        connectedToExisting = true;
+      } catch {
         connectedToExisting = false;
-        
-        // Close any partial browser connection
-        if (browser) {
-          try {
-            await browser.close();
-          } catch (e) {
-            console.warn('⚠️ Error closing browser after failed connection:', e.message);
-          }
-        }
-    }
-
-    // If we get here, we need to launch a new browser instance
-    console.log('🚀 Launching new browser instance with VPN support...');
-    
-    // Ensure we have a clean slate for browser arguments
-    const vpnArgs = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--disable-web-security',
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=1920,1080',
-      '--start-maximized'
-    ];
-    
-    // Add VPN/proxy configuration if enabled
-    if (useProxy) {
-      const proxyServer = process.env.PROXY_SERVER || opts.proxyServer || 'http://185.199.229.156:7492';
-      if (proxyServer) {
-        console.log(`🔌 Configuring proxy server: ${proxyServer}`);
-        
-        // Add proxy authentication if credentials are provided
-        let finalProxyUrl = proxyServer;
-        if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
-          const proxyUrl = new URL(proxyServer);
-          proxyUrl.username = process.env.PROXY_USERNAME;
-          proxyUrl.password = process.env.PROXY_PASSWORD;
-          finalProxyUrl = proxyUrl.toString();
-          console.log('🔑 Added proxy authentication');
-        }
-        
-        console.log(`🌐 Final proxy URL: ${finalProxyUrl.replace(/:([^@]*)@/g, ':***@')}`);
-        
-        vpnArgs.push(
-          `--proxy-server=${finalProxyUrl}`,
-          '--proxy-bypass-list=<-loopback>',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-site-isolation-trials',
-          '--disable-web-security',
-          '--disable-blink-features=AutomationControlled',
-          '--ignore-certificate-errors',
-          '--ignore-ssl-errors',
-          '--enable-features=NetworkService',
-          '--no-proxy-server',
-          '--disable-http2',
-          '--enable-tcp-fast-open',
-          '--enable-http2-gzip-compression'
-        );
-        
-        console.log('✅ Proxy configuration applied');
-      } else {
-        console.warn('⚠️ Proxy enabled but no proxy server specified');
       }
     }
-    
-    // Add extension directory if specified
-    if (process.env.CHROME_EXTENSION_DIR) {
-      vpnArgs.push(`--load-extension=${process.env.CHROME_EXTENSION_DIR}`);
-      console.log('🔌 Loading Chrome extensions from:', process.env.CHROME_EXTENSION_DIR);
-    }
+    if (!browser) browser = await puppeteer.launch(launchOptions);
 
-    // Add user data directory to maintain extensions and cookies
-    if (process.env.CHROME_USER_DATA_DIR) {
-      vpnArgs.push(`--user-data-dir=${process.env.CHROME_USER_DATA_DIR}`);
-      console.log('📁 Using Chrome user data from:', process.env.CHROME_USER_DATA_DIR);
-    }
-    
-    // Update launch options with VPN arguments
-    launchOptions.args = [...new Set([...launchOptions.args, ...vpnArgs])];
-    
-    // Ensure no duplicate arguments
-    launchOptions.args = Array.from(new Set(launchOptions.args.map(arg => {
-      // Remove any existing proxy-server argument to avoid duplicates
-      if (arg.startsWith('--proxy-server=')) {
-        return `--proxy-server=${launchOptions.args.find(a => a.startsWith('--proxy-server='))?.split('=')[1] || ''}`;
-      }
-      return arg;
-    })));
-    
-    console.log('🔧 Final browser launch options:', JSON.stringify({
-      ...launchOptions,
-      args: launchOptions.args.map(arg => 
-        arg.includes('proxy') ? 
-          arg.replace(/(https?:\/\/)[^:]+:[^@]+@/g, '$1***:***@') : 
-          arg
-      )
-    }, null, 2));
-    
-    // Add error handling for browser launch
-    try {
-      console.log('🚀 Attempting to launch browser with VPN...');
+    page = await browser.newPage();
 
-      browser = await puppeteer.launch(launchOptions);
-      
-      // Verify proxy is working
-      const page = await browser.newPage();
-      console.log('🌐 Verifying proxy connection...');
-      
-      try {
-        await page.goto('http://httpbin.org/ip', { waitUntil: 'networkidle2', timeout: 30000 });
-        const content = await page.content();
-        console.log('🌍 IP Information:', content);
-        console.log('✅ Successfully launched browser with VPN/proxy');
-      } catch (e) {
-        console.warn('⚠️ Could not verify proxy connection:', e.message);
-        console.log('ℹ️ Continuing with browser launch...');
-      }
-      
-      return { browser, page };
-    } catch (error) {
-      console.error('❌ Failed to launch browser with VPN:', error);
-      if (browser) await browser.close();
-      throw new Error(`Failed to launch browser with VPN: ${error.message}`);
-    }
-
-    const page = await browser.newPage();
-    
-    // Set a realistic user agent
-    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    await page.setUserAgent(userAgent);
-    
-    // Set viewport and device metrics
-    await page.setViewport({ 
-      width: 1366, 
-      height: 768,
-      deviceScaleFactor: 1,
-      isMobile: false,
-      hasTouch: false
-    });
+    // Language and UA hints
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // Set timeouts
-    page.setDefaultNavigationTimeout(DEFAULT_TIMEOUT);
-    page.setDefaultTimeout(DEFAULT_TIMEOUT);
+    page.setDefaultNavigationTimeout(Math.min(DEFAULT_TIMEOUT, 60000));
+    page.setDefaultTimeout(Math.min(DEFAULT_TIMEOUT, 60000));
 
-    // Set proxy authentication if needed
-    if (useProxy && process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
-      console.log('🔐 Authenticating with proxy...');
-      await page.authenticate({ 
-        username: process.env.PROXY_USERNAME, 
-        password: process.env.PROXY_PASSWORD 
+    // Only lightly block heavy resources to avoid breaking login
+    try {
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        const type = req.resourceType();
+        if (type === 'image' || type === 'media' || type === 'font') return req.abort();
+        req.continue();
       });
+    } catch (_) {}
+
+    // Optional proxy auth
+    if (useProxy && process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
+      await page.authenticate({ username: process.env.PROXY_USERNAME, password: process.env.PROXY_PASSWORD });
     }
 
-    // Randomize some browser properties to avoid detection
-    await page.evaluateOnNewDocument(() => {
+    // Warm-up
+    try { await retryGoto(page, 'about:blank', 1); } catch (_) {}
 
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      // Overwrite the `plugins` property to use a custom getter
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5],
-      });
-
-      // Overwrite the `languages` property to use a custom getter
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-      });
-
-      // Overwrite the `webdriver` property to make it false
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => false,
-      });
-
-      // Set Chrome app version to a common one
-      Object.defineProperty(navigator, 'appVersion', {
-        get: () => '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      });
-    });
-
-    // Block unnecessary resources to speed up loading
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      const url = request.url();
-      const resourceType = request.resourceType();
-      
-      // Block unnecessary resources
-      const blockResources = ['image', 'stylesheet', 'font', 'media', 'imageset', 'other'];
-      const blockedDomains = ['analytics', 'facebook', 'google-analytics', 'doubleclick', 'googletagmanager'];
-      
-      // Block resources from blocked domains
-      const shouldBlock = blockedDomains.some(domain => url.includes(domain)) || 
-                         blockResources.includes(resourceType);
-      
-      if (shouldBlock) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
-
-    // Try multiple login URLs with different approaches and user agents
+    // Try multiple TikTok login URLs
     const loginUrls = [
-      { 
-        url: 'https://www.tiktok.com/login/phone-or-email/email', 
-        method: 'direct',
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      },
-      { 
-        url: 'https://www.tiktok.com/login', 
-        method: 'direct',
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      },
-      { 
-        url: 'https://www.tiktok.com/', 
-        method: 'navigate',
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
-      }
+      'https://www.tiktok.com/login/phone-or-email/email',
+      'https://www.tiktok.com/login',
+      'https://www.tiktok.com/foryou'
     ];
 
     let loaded = false;
-    for (const { url, method, userAgent } of loginUrls) {
-      try {
-        console.log(`🌐 Attempting to load: ${url} (${method})`);
-        
-        // Set user agent for this attempt
-        await page.setUserAgent(userAgent);
-        
-        // Set extra headers to mimic a real browser
-        await page.setExtraHTTPHeaders({
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-          'Referer': 'https://www.google.com/',
-          'Upgrade-Insecure-Requests': '1'
-        });
-        
-        if (method === 'direct') {
-          await page.goto(url, { 
-            waitUntil: ['domcontentloaded', 'networkidle2'],
-            timeout: 60000, // Increased timeout to 60 seconds
-            referer: 'https://www.google.com/'
-          });
-        } else {
-          // Try loading homepage first, then navigate to login
-          await page.goto('https://www.tiktok.com/', { 
-            waitUntil: 'networkidle2',
-            timeout: DEFAULT_TIMEOUT
-          });
-          
-          // Click on login button if it exists
-          const loginButton = await page.$('div[data-e2e="top-login-button"]');
-          if (loginButton) {
-            await Promise.all([
-              loginButton.click(),
-              page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {})
-            ]);
-          } else {
-            await page.goto(url, { 
-              waitUntil: 'networkidle2',
-              timeout: DEFAULT_TIMEOUT
-            });
-          }
-        }
-        
-        // Check if we're on a login page
-        const isLoginPage = await page.evaluate(() => {
-          return document.querySelector('input[type="email"], input[type="password"]') !== null || 
-                 document.querySelector('button[type="submit"]') !== null;
-        });
-        
-        if (isLoginPage) {
-          loaded = true;
-          console.log('✅ Successfully loaded login page');
-          break;
-        }
-      } catch (error) {
-        console.warn(`⚠️ Failed to load ${url}:`, error.message);
-        // Take a screenshot for debugging
-        await page.screenshot({ path: `error-${Date.now()}.png` }).catch(() => {});
-      }
+    for (const url of loginUrls) {
+      try { await retryGoto(page, url, 3); loaded = true; break; } catch (e) { console.warn('login url failed:', e.message); }
     }
-    
-    if (!loaded) {
-      throw new Error("Failed to reach TikTok login page. The site might be blocking automated access. Please try again later or use a different IP/proxy.");
+    if (!loaded) throw new Error('Unable to reach TikTok login routes (network/VPN issue).');
+
+    // Wait for any plausible input to appear
+    const selectors = [ 'input[name="email"]', 'input[name="username"]', 'input[type="text"]', 'input[type="password"]' ];
+    try {
+      await Promise.race(selectors.map(sel => page.waitForSelector(sel, { visible: true, timeout: 15000 })));
+    } catch (_) {
+      // Not fatal; proceed and try typing
     }
 
-    // Add random delays between actions to mimic human behavior
-    const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-    const randomDelay = (min, max) => delay(Math.random() * (max - min) + min);
-
-    // Selectors with higher priority first
-    const usernameSelectors = [
-      'input[type="email"]',
-      'input[name="email"]',
-      'input[name="username"]',
-      'input[type="text"]',
-      'input[placeholder*="email" i]',
-      'input[placeholder*="username" i]',
-      'input[placeholder*="login" i]',
-      'input[autocomplete="email"]',
-      'input[autocomplete="username"]'
-    ];
-
-    const passwordSelectors = [
-      'input[type="password"]',
-      'input[name="password"]',
-      'input[placeholder*="password" i]',
-      'input[autocomplete="current-password"]'
-    ];
-
-    const loginButtonSelectors = [
-      'button[type="submit"]',
-      'button:has-text("Log in")',
-      'button:has-text("Sign in")',
-      'button:contains("Log in")',
-      'button:contains("Sign in")',
-      'div[data-e2e="login-button"]',
-      'button.login-button',
-      'button.btn-login'
-    ];
-
-    // Helper function to type with human-like delays
-    async function humanType(element, text) {
-      await element.click({ clickCount: 3 }); // Select all text if any
-      await element.press('Backspace');
-      
-      // Type with random delays between keystrokes
-      for (const char of text) {
-        await element.type(char, { delay: Math.random() * 50 + 30 });
-      }
-      
-      // Random delay after typing
-      await randomDelay(100, 300);
-    }
-
-    // Helper function to find and interact with elements
-    async function tryType(selectors, value) {
-      for (const sel of selectors) {
-        try {
-          const el = await page.$(sel);
-          if (!el) continue;
-          
-          await el.scrollIntoViewIfNeeded();
-          await el.click({ clickCount: 3 }).catch(() => {}); // Select all text if any
-          await delay(100);
-          await humanType(el, value);
-          return true;
-        } catch (error) {
-          console.warn(`Failed with selector ${sel}:`, error.message);
-        }
+    // Type helpers
+    async function tryType(list, text) {
+      for (const sel of list) {
+        const el = await page.$(sel);
+        if (!el) continue;
+        try { await el.click({ clickCount: 3 }); } catch (_) {}
+        try { await el.focus(); } catch (_) {}
+        try { await page.type(sel, text, { delay: 50 }); return true; } catch (_) {}
       }
       return false;
     }
 
-    // Type username and password with error handling
-    console.log('🔑 Attempting to enter credentials...');
-    const typedUser = await tryType(usernameSelectors, loginUsername);
-    if (!typedUser) {
-      throw new Error('Failed to find username/email field. The page structure might have changed.');
+    const typedUser = await tryType(['input[name="email"]','input[name="username"]','input[type="text"]'], loginUsername);
+    const typedPass = await tryType(['input[name="password"]','input[type="password"]'], loginPassword);
+
+    try { await page.keyboard.press('Enter'); } catch (_) {}
+    for (const sel of ['button[type="submit"]','button[role="button"]']) {
+      try { const el = await page.$(sel); if (el) { await el.click(); break; } } catch (_) {}
     }
-    
-    await randomDelay(500, 1500); // Natural delay between fields
-    
-    const typedPass = await tryType(passwordSelectors, loginPassword);
-    if (!typedPass) {
-      throw new Error('Failed to find password field. The page structure might have changed.');
+
+    // Cookie polling
+    const maxChecks = 20; const delay = 700;
+    let sessionCookie = null; let finalCookies = [];
+    for (let i = 0; i < maxChecks; i++) {
+      finalCookies = await page.cookies();
+      sessionCookie = finalCookies.find(c => ['sessionid','sessionid_ss','sid_tt'].some(n => (c.name || '').includes(n)));
+      if (sessionCookie) break;
+      await page.waitForTimeout(delay);
     }
-    
-    console.log('✅ Credentials entered successfully');
-    await randomDelay(800, 2000); // Natural delay before submission
-    
-    // Try to submit the form
-    console.log('🚀 Attempting to submit login form...');
-    
-    // First try: Press Enter on the password field
-    try {
-      const passwordField = await page.$('input[type="password"]');
-      if (passwordField) {
-        await passwordField.press('Enter');
-        console.log('🔘 Submitted form using Enter key');
-        await randomDelay(2000, 4000);
-      }
-    } catch (error) {
-      console.warn('Could not submit with Enter key:', error.message);
-    }
-    
-    // Second try: Click the login button directly
-    let loginSuccessful = false;
-    for (const sel of loginButtonSelectors) {
-      try {
-        const buttons = await page.$$(sel);
-        for (const button of buttons) {
-          try {
-            const isVisible = await button.isVisible();
-            if (isVisible) {
-              await button.scrollIntoViewIfNeeded();
-              await randomDelay(300, 800);
-              await button.click({ delay: 100 });
-              console.log(`✅ Clicked login button with selector: ${sel}`);
-              loginSuccessful = true;
-              await randomDelay(2000, 4000);
-              break;
-            }
-          } catch (error) {
-            console.warn(`Error clicking button with selector ${sel}:`, error.message);
-          }
-        }
-        if (loginSuccessful) break;
-      } catch (error) {
-        console.warn(`Error finding login button with selector ${sel}:`, error.message);
-      }
-    }
-    
-    // Check for login success or failure
-    console.log('🔍 Checking login status...');
-    await randomDelay(3000, 6000); // Wait for any redirects or error messages
-    
-    // Check for error messages
-    const errorMessages = await page.evaluate(() => {
-      const errorElements = Array.from(document.querySelectorAll('[role="alert"], .error-message, .error, .error-text, [class*="error" i]'));
-      return errorElements.map(el => el.textContent.trim()).filter(Boolean);
-    });
-    
-    if (errorMessages.length > 0) {
-      throw new Error(`Login failed: ${errorMessages.join(' | ')}`);
-    }
-    
-    // Check if we're on a logged-in page
-    const isLoggedIn = await page.evaluate(() => {
-      return !document.querySelector('input[type="password"]') && 
-             (document.body.innerText.includes('For You') || 
-              document.body.innerText.includes('Following') ||
-              !!document.querySelector('[data-e2e="top-logo"]'));
-    });
-    
-    if (!isLoggedIn) {
-      // Take a screenshot for debugging
-      const screenshotPath = `login-error-${Date.now()}.png`;
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      console.warn(`⚠️ Login status unclear. Saved screenshot to ${screenshotPath}`);
-      
-      // Check for captcha
-      const hasCaptcha = await page.evaluate(() => {
-        return !!document.querySelector('iframe[src*="captcha"], .captcha-container, #captcha');
-      });
-      
-      if (hasCaptcha) {
-        throw new Error('CAPTCHA detected. Please try again later or use a different IP/proxy.');
-      }
-      
-      throw new Error('Login failed. Please check your credentials and try again.');
-    }
-    
-    console.log('🎉 Successfully logged in!');
-    
-    // Wait for session cookie to be set
-    console.log('🔍 Waiting for session cookie...');
-    const checkInterval = 1000;
-    const maxChecks = 10; // 10 seconds max
-    let sessionCookie = null;
-    let attempts = 0;
-    
-    while (attempts < maxChecks && !sessionCookie) {
-      attempts++;
-      await delay(checkInterval);
-      
-      // Check for session cookies
-      const allCookies = await page.cookies();
-      sessionCookie = allCookies.find(c => 
-        c.name.includes('session') || 
-        c.name.includes('sid_tt') || 
-        c.name === 'sessionid' || 
-        c.name === 'session_id'
-      );
-      
-      // Check if we're still on the login page (which would indicate login failure)
-      const stillOnLoginPage = await page.evaluate(() => {
-        return !!document.querySelector('input[type="password"]') || 
-               !!document.querySelector('button[type="submit"]');
-      });
-      
-      if (stillOnLoginPage && attempts > 3) {
-        // If we're still on the login page after a few attempts, check for errors
-        const errorMessage = await page.evaluate(() => {
-          const errorEl = document.querySelector('[role="alert"], .error-message, .error, .error-text, [class*="error" i]');
-          return errorEl ? errorEl.textContent.trim() : null;
-        });
-        
-        if (errorMessage) {
-          throw new Error(`Login error: ${errorMessage}`);
-        }
-      }
-      
-      console.log(`Attempt ${attempts}/${maxChecks}: ${sessionCookie ? 'Session found' : 'Waiting for session...'}`);
-    }
-    
-    if (!sessionCookie) {
-      // Take a screenshot for debugging
-      const screenshotPath = `login-session-error-${Date.now()}.png`;
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      console.warn(`⚠️ Could not find session cookie. Saved screenshot to ${screenshotPath}`);
-      
-      // Check if we're actually logged in despite missing session cookie
-      const isActuallyLoggedIn = await page.evaluate(() => {
-        return !document.querySelector('input[type="password"]') && 
-               (document.body.innerText.includes('For You') || 
-                document.body.innerText.includes('Following') ||
-                !!document.querySelector('[data-e2e="top-logo"]'));
-      });
-      
-      if (!isActuallyLoggedIn) {
-        throw new Error('Login verification failed. Please check your credentials and try again.');
-      }
-      
-      console.warn('⚠️ Proceeding without session cookie - user appears to be logged in');
-    }
-    
-    // Get final cookies and user data
-    const finalCookies = await page.cookies();
-    const userData = await page.evaluate(() => {
-      try {
-        const script = Array.from(document.scripts).find(s => 
-          s.textContent && s.textContent.includes('SIGI_STATE')
-        );
-        if (script) {
-          const match = script.textContent.match(/SIGI_STATE\s*=\s*({.+?});/);
-          if (match) {
-            return JSON.parse(match[1]);
-          }
-        }
-      } catch (e) {
-        console.warn('Error extracting user data:', e.message);
-        return null;
-      }
-      return null;
-    });
-    
-    console.log('✅ Login process completed successfully');
-    
-    // Final cleanup and return
-    try {
-      // Take a final screenshot for reference
-      const screenshot = await page.screenshot({ encoding: 'base64' });
-      
-      // Close the browser if we're not reusing it
-      if (!connectedToExisting && browser) {
-        await browser.close();
-      }
-      
-      // Verify we have a valid session
-      if (!sessionCookie) {
-        throw new Error('Login did not produce a valid session. Please check your credentials and try again.');
-      }
-      
-      return {
-        success: true,
-        cookies: finalCookies,
-        session: sessionCookie,
-        userData: userData,
-        userAgent: userAgent,
-        screenshot: screenshot
-      };
-      
-    } catch (error) {
-      console.error('❌ Error during login process:', error.message);
-      
-      // Take a screenshot of the error state
-      try {
-        await page.screenshot({ path: `login-error-${Date.now()}.png`, fullPage: true });
-      } catch (screenshotError) {
-        console.warn('Could not take error screenshot:', screenshotError.message);
-      }
-      
-      // Ensure browser is closed even if there's an error
-      try {
-        if (!connectedToExisting && browser) {
-          await browser.close();
-        }
-      } catch (closeError) {
-        console.warn('Error closing browser:', closeError.message);
-      }
-      
-      // Re-throw the original error
-      throw error;
-    }
-  }
- } catch (err) {
-    try { 
-      if (browser && !connectedToExisting) await browser.close(); 
-    } 
-    catch (_) {}
-    throw err;
+    if (!sessionCookie) throw new Error('No valid session cookies found after login.');
+
+    if (browser && !connectedToExisting) { try { await browser.close(); } catch (_) {} }
+    return finalCookies;
+  } catch (error) {
+    console.error('❌ Error during login process:', error.message);
+    try { if (page) await page.screenshot({ path: `login-error-${Date.now()}.png`, fullPage: true }); } catch (_) {}
+    if (browser && !connectedToExisting) { try { await browser.close(); } catch (_) {} }
+    throw new Error(`Login failed: ${error.message}`);
   }
 }
 
