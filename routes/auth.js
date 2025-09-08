@@ -47,6 +47,13 @@ function failJob(id, errorMessage) {
   }
 }
 
+function normalizeCookies(loginResult) {
+  if (!loginResult) return null;
+  if (Array.isArray(loginResult)) return loginResult;
+  if (loginResult.cookies && Array.isArray(loginResult.cookies)) return loginResult.cookies;
+  return null;
+}
+
 /**
  * POST /auth/login-scrape (async)
  * Accepts request, returns 202 with jobId immediately to avoid 15s ingress timeout.
@@ -65,12 +72,27 @@ router.post("/login-scrape", async (req, res) => {
         return;
       }
 
-      const cookies = await loginTikTok(loginUsername, loginPassword, {
-        useProxy: process.env.USE_PROXY === "true",
-        proxyServer: process.env.PROXY_SERVER,
-        proxyUsername: process.env.PROXY_USERNAME,
-        proxyPassword: process.env.PROXY_PASSWORD
-      });
+      console.log('🔑 Attempting to log in...');
+      let loginResult;
+      try {
+        loginResult = await loginTikTok(loginUsername, loginPassword, {
+          useProxy: process.env.USE_PROXY === "true",
+          proxyServer: process.env.PROXY_SERVER,
+          proxyUsername: process.env.PROXY_USERNAME,
+          proxyPassword: process.env.PROXY_PASSWORD
+        });
+      } catch (loginError) {
+        console.error('❌ Login error:', loginError);
+        failJob(job.id, `Login failed: ${loginError.message}`);
+        return;
+      }
+
+      const cookies = normalizeCookies(loginResult);
+      if (!cookies) {
+        console.error('❌ Invalid cookies in login result');
+        failJob(job.id, 'Login failed: No valid cookies received');
+        return;
+      }
 
       let scraped;
       if (scrapeVideos) {
@@ -168,12 +190,15 @@ router.post("/login-only", async (req, res) => {
       });
     }
 
-    const cookies = await loginTikTok(loginUsername, loginPassword, {
+    const loginResult = await loginTikTok(loginUsername, loginPassword, {
       useProxy: process.env.USE_PROXY === "true",
       proxyServer: process.env.PROXY_SERVER,
       proxyUsername: process.env.PROXY_USERNAME,
       proxyPassword: process.env.PROXY_PASSWORD
     });
+
+    const cookies = normalizeCookies(loginResult);
+    if (!cookies) return res.status(500).json({ success: false, error: 'No valid cookies received' });
 
     res.json({
       success: true,
@@ -234,7 +259,7 @@ router.post("/scrape-only", async (req, res) => {
   } catch (err) {
     console.error("❌ scrape-only error:", err);
     res.status(500).json({ 
-      success: false,
+      success: false, 
       error: err.message 
     });
   }
