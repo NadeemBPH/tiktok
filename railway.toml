@@ -28,9 +28,9 @@
   type = "http"
   path = "/health"
   timeout = 60
-  interval = 60s
+  interval = "60s"
   threshold = 3
-  initialDelay = 30s
+  initialDelay = "30s"
   
 [deploy.resources]
   # Adjust these based on your needs
@@ -40,5 +40,5 @@
 [deploy.checks]
   enabled = true
   timeout = 60
-  interval = 30s
+  interval = "30s"
   retries = 3

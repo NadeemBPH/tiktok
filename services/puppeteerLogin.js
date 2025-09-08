@@ -13,6 +13,8 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   const DEFAULT_TIMEOUT = Math.min(parseInt(process.env.PUPPETEER_TIMEOUT || "45000", 10), 90000);
   const connectExisting = (process.env.CONNECT_EXISTING_CHROME === "true") || opts.connectExisting;
   const useProxy = (process.env.USE_PROXY === "true") || opts.useProxy;
+  const manualLogin = (process.env.MANUAL_LOGIN === 'true') || opts.manualLogin === true;
+  const manualTimeoutMs = parseInt(process.env.MANUAL_LOGIN_TIMEOUT || '180000', 10); // 3min default
 
   const remoteDebuggerUrl = process.env.CONNECTED_CHROME_URL || opts.connectedChromeUrl || "http://127.0.0.1:9222";
 
@@ -24,7 +26,7 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
   const launchOptions = {
     headless: envHeadless ? 'new' : (isProduction ? 'new' : false),
     ignoreHTTPSErrors: true,
-    executablePath: '/usr/bin/google-chrome-stable',
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
     timeout: 30000,
     dumpio: false,
     args: [
@@ -109,63 +111,68 @@ async function loginTikTok(loginUsername, loginPassword, opts = {}) {
       await page.authenticate({ username: process.env.PROXY_USERNAME, password: process.env.PROXY_PASSWORD });
     }
 
-    // Warm-up
-    try { await retryGoto(page, 'about:blank', 1); } catch (_) {}
-
-    // Try multiple TikTok login URLs
+    // Navigate to TikTok login
     const loginUrls = [
       'https://www.tiktok.com/login/phone-or-email/email',
       'https://www.tiktok.com/login',
       'https://www.tiktok.com/foryou'
     ];
-
     let loaded = false;
     for (const url of loginUrls) {
-      try { await retryGoto(page, url, 3); loaded = true; break; } catch (e) { console.warn('login url failed:', e.message); }
+      try { await retryGoto(page, url, 3); loaded = true; break; } catch (_) {}
     }
-    if (!loaded) throw new Error('Unable to reach TikTok login routes (network/VPN issue).');
+    if (!loaded) throw new Error('Unable to reach TikTok (network/proxy/VPN issue)');
 
-    // Wait for any plausible input to appear
-    const selectors = [ 'input[name="email"]', 'input[name="username"]', 'input[type="text"]', 'input[type="password"]' ];
-    try {
-      await Promise.race(selectors.map(sel => page.waitForSelector(sel, { visible: true, timeout: 15000 })));
-    } catch (_) {
-      // Not fatal; proceed and try typing
-    }
-
-    // Type helpers
-    async function tryType(list, text) {
-      for (const sel of list) {
-        const el = await page.$(sel);
-        if (!el) continue;
-        try { await el.click({ clickCount: 3 }); } catch (_) {}
-        try { await el.focus(); } catch (_) {}
-        try { await page.type(sel, text, { delay: 50 }); return true; } catch (_) {}
+    // Manual login mode: let the user complete login, then collect cookies
+    if (manualLogin) {
+      console.log('Manual login mode enabled. Please complete login in the opened browser window.');
+      const end = Date.now() + manualTimeoutMs;
+      while (Date.now() < end) {
+        const cookies = await page.cookies();
+        const sessionCookie = cookies.find(c => ['sessionid','sessionid_ss','sid_tt'].some(n => (c.name || '').includes(n)));
+        if (sessionCookie) {
+          if (!connectedToExisting) { try { await browser.close(); } catch (_) {} }
+          return cookies;
+        }
+        await page.waitForTimeout(1000);
       }
-      return false;
+      throw new Error('Manual login timed out without obtaining session cookies');
     }
 
-    const typedUser = await tryType(['input[name="email"]','input[name="username"]','input[type="text"]'], loginUsername);
-    const typedPass = await tryType(['input[name="password"]','input[type="password"]'], loginPassword);
-
-    try { await page.keyboard.press('Enter'); } catch (_) {}
-    for (const sel of ['button[type="submit"]','button[role="button"]']) {
-      try { const el = await page.$(sel); if (el) { await el.click(); break; } } catch (_) {}
+    // Auto type credentials when provided
+    if (loginUsername && loginPassword) {
+      // Type helpers
+      async function tryType(list, text) {
+        for (const sel of list) {
+          const el = await page.$(sel);
+          if (!el) continue;
+          try { await el.click({ clickCount: 3 }); } catch (_) {}
+          try { await el.focus(); } catch (_) {}
+          try { await page.type(sel, text, { delay: 50 }); return true; } catch (_) {}
+        }
+        return false;
+      }
+      await tryType(['input[name="email"]','input[name="username"]','input[type="text"]'], loginUsername);
+      await tryType(['input[name="password"]','input[type="password"]'], loginPassword);
+      try { await page.keyboard.press('Enter'); } catch (_) {}
+      for (const sel of ['button[type="submit"]','button[role="button"]']) {
+        try { const el = await page.$(sel); if (el) { await el.click(); break; } } catch (_) {}
+      }
     }
 
-    // Cookie polling
-    const maxChecks = 20; const delay = 700;
-    let sessionCookie = null; let finalCookies = [];
+    // Wait for session cookie
+    const maxChecks = 30; const delay = 700;
+    let finalCookies = [];
     for (let i = 0; i < maxChecks; i++) {
       finalCookies = await page.cookies();
-      sessionCookie = finalCookies.find(c => ['sessionid','sessionid_ss','sid_tt'].some(n => (c.name || '').includes(n)));
-      if (sessionCookie) break;
+      const sessionCookie = finalCookies.find(c => ['sessionid','sessionid_ss','sid_tt'].some(n => (c.name || '').includes(n)));
+      if (sessionCookie) {
+        if (!connectedToExisting) { try { await browser.close(); } catch (_) {} }
+        return finalCookies;
+      }
       await page.waitForTimeout(delay);
     }
-    if (!sessionCookie) throw new Error('No valid session cookies found after login.');
-
-    if (browser && !connectedToExisting) { try { await browser.close(); } catch (_) {} }
-    return finalCookies;
+    throw new Error('No valid session cookies found after login');
   } catch (error) {
     console.error('❌ Error during login process:', error.message);
     try { if (page) await page.screenshot({ path: `login-error-${Date.now()}.png`, fullPage: true }); } catch (_) {}
